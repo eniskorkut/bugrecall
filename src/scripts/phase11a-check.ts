@@ -1,8 +1,14 @@
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { fileURLToPath } from "node:url";
+
+const scriptFile = fileURLToPath(import.meta.url);
+const scriptDir = path.dirname(scriptFile);
+const repoRoot = path.resolve(scriptDir, "../..");
+const pmaPath = path.join(repoRoot, "bin", "pma.js");
 
 function parseToolText(result: unknown): Record<string, unknown> {
   const safe = result as { content?: Array<{ type?: string; text?: string }> };
@@ -12,7 +18,7 @@ function parseToolText(result: unknown): Record<string, unknown> {
 
 async function withClientInCwd<T>(cwd: string, fn: (client: Client) => Promise<T>): Promise<T> {
   const client = new Client({ name: "phase11a-check", version: "0.0.0" }, { capabilities: {} });
-  const transport = new StdioClientTransport({ command: "node", args: ["/Users/eniskorkut/Desktop/bugrecall/project-memory-agent/bin/pma.js"], cwd });
+  const transport = new StdioClientTransport({ command: "node", args: [pmaPath], cwd });
   await client.connect(transport);
   try {
     return await fn(client);
