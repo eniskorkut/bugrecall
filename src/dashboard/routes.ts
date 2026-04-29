@@ -25,7 +25,7 @@ export async function handleApiRequest(cwd: string, method: string, pathname: st
   }
 
   const data = await buildIdentityAndProfile(cwd);
-  const { store } = await ensureStore(data.projectRoot);
+  const { store } = await ensureStore(data.agentRoot);
   try {
     if (pathname === "/api/project" && method === "GET") {
       return {

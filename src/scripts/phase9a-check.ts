@@ -29,7 +29,7 @@ async function fetchJson(url: string, init?: RequestInit): Promise<Record<string
 async function main(): Promise<void> {
   const cwd = process.cwd();
   const data = await buildIdentityAndProfile(cwd);
-  const { store } = await ensureStore(data.projectRoot);
+  const { store } = await ensureStore(data.agentRoot);
   try {
     store.upsertProject(data.identity);
     store.upsertProjectProfile(data.identity.project_id, data.profile);

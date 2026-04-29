@@ -24,7 +24,8 @@
     "phase9a:check": "tsx src/scripts/phase9a-check.ts",
     "phase9b:check": "tsx src/scripts/phase9b-check.ts",
     "phase10:check": "tsx src/scripts/phase10-check.ts",
-    "phase11a:check": "npm run build && node dist/scripts/phase11a-check.js"
+    "phase11a:check": "npm run build && node dist/scripts/phase11a-check.js",
+    "phase11b:check": "npm run build && node dist/scripts/phase11b-check.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.0",

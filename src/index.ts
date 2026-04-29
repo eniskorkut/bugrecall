@@ -231,6 +231,44 @@ function detectGitRoot(cwd: string): string {
   return root ?? cwd;
 }
 
+const WORKSPACE_MANIFEST_FILES = [
+  "package.json",
+  "pyproject.toml",
+  "requirements.txt",
+  "setup.py",
+  "uv.lock",
+  "poetry.lock",
+  "Cargo.toml",
+  "go.mod",
+] as const;
+
+function listManifestFiles(root: string): string[] {
+  return WORKSPACE_MANIFEST_FILES.filter((name) => existsSync(path.join(root, name)));
+}
+
+function findNearestManifestRoot(cwd: string, stopAt: string): string | null {
+  let current = path.resolve(cwd);
+  const stop = path.resolve(stopAt);
+  while (true) {
+    if (listManifestFiles(current).length > 0) return current;
+    if (current === stop) break;
+    const parent = path.dirname(current);
+    if (parent === current) break;
+    current = parent;
+  }
+  return null;
+}
+
+function detectRepoRoot(cwd: string): { repoRoot: string; detected: boolean } {
+  const root = runGit(["rev-parse", "--show-toplevel"], cwd);
+  if (!root) return { repoRoot: cwd, detected: false };
+  return { repoRoot: root, detected: true };
+}
+
+function detectWorkspaceRoot(cwd: string, repoRoot: string): string {
+  return findNearestManifestRoot(cwd, repoRoot) ?? repoRoot;
+}
+
 function toPosixRelative(base: string, target: string): string {
   const rel = path.relative(base, target);
   if (!rel || rel === "") {
@@ -239,28 +277,34 @@ function toPosixRelative(base: string, target: string): string {
   return rel.split(path.sep).join("/");
 }
 
-async function detectManifestFingerprint(projectRoot: string): Promise<string | null> {
-  const packageJsonPath = path.join(projectRoot, "package.json");
-  const pyprojectPath = path.join(projectRoot, "pyproject.toml");
-
-  if (existsSync(packageJsonPath)) {
-    return sha256(await readFile(packageJsonPath, "utf8"));
-  }
-
-  if (existsSync(pyprojectPath)) {
-    return sha256(await readFile(pyprojectPath, "utf8"));
-  }
-
-  return null;
+function getWorkspaceRelativePath(repoRoot: string, workspaceRoot: string): string {
+  return toPosixRelative(repoRoot, workspaceRoot);
 }
 
-async function detectProfile(projectRoot: string): Promise<ProjectProfile> {
-  const packageJsonPath = path.join(projectRoot, "package.json");
-  const pyprojectPath = path.join(projectRoot, "pyproject.toml");
-  const requirementsPath = path.join(projectRoot, "requirements.txt");
-  const pnpmLockPath = path.join(projectRoot, "pnpm-lock.yaml");
-  const yarnLockPath = path.join(projectRoot, "yarn.lock");
-  const uvLockPath = path.join(projectRoot, "uv.lock");
+async function detectManifestFingerprint(workspaceRoot: string): Promise<string | null> {
+  const manifestFiles = listManifestFiles(workspaceRoot);
+  if (manifestFiles.length === 0) return null;
+  const chunks: string[] = [];
+  for (const fileName of manifestFiles) {
+    const filePath = path.join(workspaceRoot, fileName);
+    const content = await readFile(filePath, "utf8");
+    chunks.push(`${fileName}:${sha256(content)}`);
+  }
+  return sha256(chunks.sort().join("|"));
+}
+
+async function detectProfile(workspaceRoot: string, repoRootDetected: boolean, workspaceRelativePath: string): Promise<ProjectProfile> {
+  const packageJsonPath = path.join(workspaceRoot, "package.json");
+  const pyprojectPath = path.join(workspaceRoot, "pyproject.toml");
+  const requirementsPath = path.join(workspaceRoot, "requirements.txt");
+  const pnpmLockPath = path.join(workspaceRoot, "pnpm-lock.yaml");
+  const yarnLockPath = path.join(workspaceRoot, "yarn.lock");
+  const uvLockPath = path.join(workspaceRoot, "uv.lock");
+  const poetryLockPath = path.join(workspaceRoot, "poetry.lock");
+  const cargoTomlPath = path.join(workspaceRoot, "Cargo.toml");
+  const goModPath = path.join(workspaceRoot, "go.mod");
+
+  const workspaceManifestFiles = listManifestFiles(workspaceRoot);
 
   const languages = new Set<string>();
   const frameworks = new Set<string>();
@@ -330,11 +374,22 @@ async function detectProfile(projectRoot: string): Promise<ProjectProfile> {
       if (pyproject.includes("poetry")) packageManager = packageManager ?? "poetry";
     }
     if (existsSync(uvLockPath)) packageManager = packageManager ?? "uv";
+    if (existsSync(poetryLockPath)) packageManager = packageManager ?? "poetry";
     packageManager = packageManager ?? "pip";
     testCommand = testCommand ?? "pytest";
     lintCommand = lintCommand ?? "ruff check .";
     buildCommand = buildCommand ?? "python -m build";
     typecheckCommand = typecheckCommand ?? "mypy .";
+  }
+
+  if (existsSync(cargoTomlPath)) {
+    languages.add("rust");
+    packageManager = packageManager ?? "cargo";
+  }
+
+  if (existsSync(goModPath)) {
+    languages.add("go");
+    packageManager = packageManager ?? "go";
   }
 
   return {
@@ -345,11 +400,14 @@ async function detectProfile(projectRoot: string): Promise<ProjectProfile> {
     lint_command: lintCommand,
     build_command: buildCommand,
     typecheck_command: typecheckCommand,
+    repo_root_detected: repoRootDetected,
+    workspace_root_relative_path: workspaceRelativePath,
+    workspace_manifest_files: workspaceManifestFiles,
   };
 }
 
-async function isAgentIgnored(projectRoot: string): Promise<boolean> {
-  const gitIgnorePath = path.join(projectRoot, ".gitignore");
+async function isAgentIgnored(repoRoot: string): Promise<boolean> {
+  const gitIgnorePath = path.join(repoRoot, ".gitignore");
   if (!existsSync(gitIgnorePath)) return false;
   const lines = (await readFile(gitIgnorePath, "utf8"))
     .split(/\r?\n/)
@@ -362,16 +420,20 @@ export async function buildIdentityAndProfile(cwd: string): Promise<{
   identity: ProjectIdentity;
   profile: ProjectProfile;
   warnings: string[];
-  projectRoot: string;
+  repoRoot: string;
+  workspaceRoot: string;
+  agentRoot: string;
 }> {
-  const projectRoot = detectGitRoot(cwd);
-  const workspaceRelativePath = toPosixRelative(projectRoot, cwd);
-  const remoteUrl = runGit(["remote", "get-url", "origin"], projectRoot);
+  const repoResolution = detectRepoRoot(cwd);
+  const repoRoot = repoResolution.repoRoot;
+  const workspaceRoot = detectWorkspaceRoot(cwd, repoRoot);
+  const workspaceRelativePath = getWorkspaceRelativePath(repoRoot, workspaceRoot);
+  const remoteUrl = runGit(["remote", "get-url", "origin"], repoRoot);
   const gitRemoteHash = remoteUrl ? sha256(remoteUrl) : null;
   const initialCommitHash =
-    runGit(["rev-list", "--max-parents=0", "HEAD"], projectRoot)?.split(/\s+/)[0] ?? null;
-  const manifestFingerprint = await detectManifestFingerprint(projectRoot);
-  const profile = await detectProfile(projectRoot);
+    runGit(["rev-list", "--max-parents=0", "HEAD"], repoRoot)?.split(/\s+/)[0] ?? null;
+  const manifestFingerprint = await detectManifestFingerprint(workspaceRoot);
+  const profile = await detectProfile(workspaceRoot, repoResolution.detected, workspaceRelativePath);
 
   const projectId = sha256(
     [
@@ -383,7 +445,7 @@ export async function buildIdentityAndProfile(cwd: string): Promise<{
   );
 
   const warnings: string[] = [];
-  if (!(await isAgentIgnored(projectRoot))) {
+  if (!(await isAgentIgnored(repoRoot))) {
     warnings.push(".agent/ is not listed in .gitignore");
   }
 
@@ -397,12 +459,14 @@ export async function buildIdentityAndProfile(cwd: string): Promise<{
     },
     profile,
     warnings,
-    projectRoot,
+    repoRoot,
+    workspaceRoot,
+    agentRoot: repoRoot,
   };
 }
 
-export async function ensureStore(projectRoot: string): Promise<{ store: SqliteStore; dbPath: string; migrations: string[] }> {
-  const agentDir = path.join(projectRoot, ".agent");
+export async function ensureStore(agentRoot: string): Promise<{ store: SqliteStore; dbPath: string; migrations: string[] }> {
+  const agentDir = path.join(agentRoot, ".agent");
   const dbPath = path.join(agentDir, "memory.db");
   await mkdir(agentDir, { recursive: true });
   const store = new SqliteStore(dbPath);
@@ -563,7 +627,7 @@ async function runStructuredCommand(
 
 async function bootstrapProject(cwd: string): Promise<Record<string, unknown>> {
   const data = await buildIdentityAndProfile(cwd);
-  const { store, migrations } = await ensureStore(data.projectRoot);
+  const { store, migrations } = await ensureStore(data.agentRoot);
   try {
     store.upsertProject(data.identity);
     store.upsertProjectProfile(data.identity.project_id, data.profile);
@@ -595,7 +659,7 @@ async function getProjectProfile(cwd: string): Promise<Record<string, unknown>> 
 
 async function commitPostmortem(cwd: string, input: CommitPostmortemInput): Promise<Record<string, unknown>> {
   const data = await buildIdentityAndProfile(cwd);
-  const { store } = await ensureStore(data.projectRoot);
+  const { store } = await ensureStore(data.agentRoot);
   try {
     store.upsertProject(data.identity);
     store.upsertProjectProfile(data.identity.project_id, data.profile);
@@ -617,7 +681,7 @@ async function readProjectMemory(
   input: { type?: "incident" | "fact" | "decision"; limit: number },
 ): Promise<Record<string, unknown>> {
   const data = await buildIdentityAndProfile(cwd);
-  const { store } = await ensureStore(data.projectRoot);
+  const { store } = await ensureStore(data.agentRoot);
   try {
     const records = store.readProjectMemory(data.identity.project_id, input.type, input.limit);
     return {
@@ -661,7 +725,7 @@ export async function searchProjectExperience(
   input: { query: string; filters?: SearchExperienceFilters; limit: number; mode: "auto" | "text" | "vector" | "hybrid" },
 ): Promise<Record<string, unknown>> {
   const data = await buildIdentityAndProfile(cwd);
-  const { store } = await ensureStore(data.projectRoot);
+  const { store } = await ensureStore(data.agentRoot);
   const config = getEmbeddingConfig();
   const embeddingClient = getEmbeddingClient();
   try {
@@ -677,7 +741,7 @@ export async function searchProjectExperience(
     }
 
     const hybrid = await runHybridSearch({
-      projectRoot: data.projectRoot,
+      projectRoot: data.repoRoot,
       projectId: data.identity.project_id,
       query: input.query,
       filters: input.filters ?? {},
@@ -709,7 +773,7 @@ export async function indexReadyMemories(
   input: { limit: number; rebuild: boolean },
 ): Promise<Record<string, unknown>> {
   const data = await buildIdentityAndProfile(cwd);
-  const { store } = await ensureStore(data.projectRoot);
+  const { store } = await ensureStore(data.agentRoot);
   try {
     const vectorStatus = await getVectorStoreStatus();
     if (vectorStatus.state !== "available") {
@@ -726,7 +790,7 @@ export async function indexReadyMemories(
     }
 
     if (input.rebuild) {
-      const ensured = await clearVectorTable(data.projectRoot);
+      const ensured = await clearVectorTable(data.repoRoot);
       if (!ensured.ok) {
         return {
           ok: true,
@@ -756,7 +820,7 @@ export async function indexReadyMemories(
       vector: Array.from(row.vector),
     }));
 
-    const result = await upsertVectors(data.projectRoot, rows);
+    const result = await upsertVectors(data.repoRoot, rows);
     return {
       ok: true,
       tool: "index_ready_memories",
@@ -820,9 +884,9 @@ async function applySearchReplacePatch(
   input: { file_path: string; search_block: string; replace_block: string; task_run_id?: string },
 ): Promise<Record<string, unknown>> {
   const data = await buildIdentityAndProfile(cwd);
-  const { store } = await ensureStore(data.projectRoot);
+  const { store } = await ensureStore(data.agentRoot);
   try {
-    const safePath = resolveWorkspacePathSafely(cwd, input.file_path);
+    const safePath = resolveWorkspacePathSafely(data.workspaceRoot, input.file_path);
     if (!safePath.ok) {
       const patchId = store.insertPatchHistory({
         task_run_id: input.task_run_id ?? `local-${randomUUID()}`,
@@ -940,13 +1004,13 @@ async function applySearchReplacePatch(
 
 async function restoreSnapshot(cwd: string, input: { snapshot_id: string }): Promise<Record<string, unknown>> {
   const data = await buildIdentityAndProfile(cwd);
-  const { store } = await ensureStore(data.projectRoot);
+  const { store } = await ensureStore(data.agentRoot);
   try {
     const snapshot = store.getSnapshotById(input.snapshot_id);
     if (!snapshot) {
       return { success: false, reason: "snapshot_not_found", snapshot_id: input.snapshot_id };
     }
-    const safePath = resolveWorkspacePathSafely(cwd, snapshot.file_path);
+    const safePath = resolveWorkspacePathSafely(data.workspaceRoot, snapshot.file_path);
     if (!safePath.ok) {
       return { success: false, reason: safePath.reason, snapshot_id: input.snapshot_id, file_path: snapshot.file_path };
     }
@@ -968,7 +1032,7 @@ async function startTaskRun(
   input: { task_text: string; approval_budget?: Partial<TaskBudget> },
 ): Promise<Record<string, unknown>> {
   const data = await buildIdentityAndProfile(cwd);
-  const { store } = await ensureStore(data.projectRoot);
+  const { store } = await ensureStore(data.agentRoot);
   try {
     const budget = defaultTaskBudget(input.approval_budget);
     const created = store.startTaskRun(data.identity.project_id, input.task_text, budget, randomUUID());
@@ -987,7 +1051,7 @@ async function startTaskRun(
 
 async function getTaskRun(cwd: string, input: { task_run_id: string }): Promise<Record<string, unknown>> {
   const data = await buildIdentityAndProfile(cwd);
-  const { store } = await ensureStore(data.projectRoot);
+  const { store } = await ensureStore(data.agentRoot);
   try {
     const row = store.getTaskRunById(input.task_run_id);
     if (!row) return { ok: false, reason: "task_run_not_found", task_run_id: input.task_run_id };
@@ -1019,7 +1083,7 @@ async function logAttempt(
   input: { task_run_id: string; kind: "patch" | "command" | "reasoning" | "memory"; summary: string; success: boolean; metadata?: Record<string, unknown> },
 ): Promise<Record<string, unknown>> {
   const data = await buildIdentityAndProfile(cwd);
-  const { store } = await ensureStore(data.projectRoot);
+  const { store } = await ensureStore(data.agentRoot);
   try {
     const row = store.getTaskRunById(input.task_run_id);
     if (!row) return { ok: false, reason: "task_run_not_found", task_run_id: input.task_run_id };
@@ -1045,7 +1109,7 @@ async function runProjectCommand(
   input: { task_run_id: string; kind: "test" | "lint" | "build" | "typecheck" },
 ): Promise<Record<string, unknown>> {
   const data = await buildIdentityAndProfile(cwd);
-  const { store } = await ensureStore(data.projectRoot);
+  const { store } = await ensureStore(data.agentRoot);
   try {
     const taskRun = store.getTaskRunById(input.task_run_id);
     if (!taskRun) return { ok: false, reason: "task_run_not_found", task_run_id: input.task_run_id };
@@ -1111,7 +1175,7 @@ async function runProjectCommand(
     }
 
     const command = parsedCommand.value;
-    const runResult = await runStructuredCommand(command.cmd, command.args, data.projectRoot, budget.timeout_ms);
+    const runResult = await runStructuredCommand(command.cmd, command.args, data.workspaceRoot, budget.timeout_ms);
     const success = runResult.exit_code === 0;
     const combined = `${runResult.stdout}\n${runResult.stderr}`.trim();
 
@@ -1168,7 +1232,7 @@ async function createDebugSession(
   input: { task_text: string; initial_context?: string; approval_budget?: Partial<TaskBudget> },
 ): Promise<Record<string, unknown>> {
   const data = await buildIdentityAndProfile(cwd);
-  const { store } = await ensureStore(data.projectRoot);
+  const { store } = await ensureStore(data.agentRoot);
   try {
     const budget = defaultTaskBudget(input.approval_budget);
     const created = store.startTaskRun(data.identity.project_id, input.task_text, budget, randomUUID());
@@ -1201,7 +1265,7 @@ async function recordErrorObservation(
   input: { task_run_id: string; raw_output: string; command_kind?: "test" | "lint" | "build" | "typecheck" | "manual"; context?: Record<string, unknown> },
 ): Promise<Record<string, unknown>> {
   const data = await buildIdentityAndProfile(cwd);
-  const { store } = await ensureStore(data.projectRoot);
+  const { store } = await ensureStore(data.agentRoot);
   try {
     const verified = verifyTaskRunForProject(store, input.task_run_id, data.identity.project_id);
     if (!verified.ok) return verified.body;
@@ -1247,7 +1311,7 @@ async function suggestNextActions(
   input: { task_run_id: string; normalized_error?: Record<string, unknown>; query?: string; limit: number },
 ): Promise<Record<string, unknown>> {
   const data = await buildIdentityAndProfile(cwd);
-  const { store } = await ensureStore(data.projectRoot);
+  const { store } = await ensureStore(data.agentRoot);
   try {
     const verified = verifyTaskRunForProject(store, input.task_run_id, data.identity.project_id);
     if (!verified.ok) return verified.body;
@@ -1299,7 +1363,7 @@ async function finalizeSuccessfulFix(
   },
 ): Promise<Record<string, unknown>> {
   const data = await buildIdentityAndProfile(cwd);
-  const { store } = await ensureStore(data.projectRoot);
+  const { store } = await ensureStore(data.agentRoot);
   try {
     const verified = verifyTaskRunForProject(store, input.task_run_id, data.identity.project_id);
     if (!verified.ok) return verified.body;
@@ -1350,7 +1414,7 @@ async function failDebugSession(
   input: { task_run_id: string; reason: string; summary?: string },
 ): Promise<Record<string, unknown>> {
   const data = await buildIdentityAndProfile(cwd);
-  const { store } = await ensureStore(data.projectRoot);
+  const { store } = await ensureStore(data.agentRoot);
   try {
     const verified = verifyTaskRunForProject(store, input.task_run_id, data.identity.project_id);
     if (!verified.ok) return verified.body;
@@ -1379,7 +1443,7 @@ export async function vectorizePendingMemories(
   input: { limit: number; retry_failed: boolean },
 ): Promise<Record<string, unknown>> {
   const data = await buildIdentityAndProfile(cwd);
-  const { store } = await ensureStore(data.projectRoot);
+  const { store } = await ensureStore(data.agentRoot);
   const config = getEmbeddingConfig();
   const model = config.model;
   const embeddingClient = getEmbeddingClient();
@@ -1459,7 +1523,7 @@ export async function vectorizePendingMemories(
         if (message.includes("Protobuf parsing failed")) {
           try {
             const cachePath = path.join(
-              data.projectRoot,
+              data.repoRoot,
               "node_modules",
               "@huggingface",
               "transformers",
@@ -1520,7 +1584,7 @@ export async function getVectorizationStatus(
   _input: { limit?: number },
 ): Promise<Record<string, unknown>> {
   const data = await buildIdentityAndProfile(cwd);
-  const { store } = await ensureStore(data.projectRoot);
+  const { store } = await ensureStore(data.agentRoot);
   const config = getEmbeddingConfig();
   const embeddingClient = getEmbeddingClient();
   if (!config.embeddings_enabled) embeddingClient.setDisabledState();

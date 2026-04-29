@@ -18,6 +18,9 @@ export type ProjectProfileRow = {
   lint_command: string | null;
   build_command: string | null;
   typecheck_command: string | null;
+  repo_root_detected?: boolean;
+  workspace_root_relative_path?: string;
+  workspace_manifest_files?: string[];
 };
 
 export type StructuredCommand = {
