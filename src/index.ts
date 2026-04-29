@@ -270,6 +270,11 @@ async function detectProfile(projectRoot: string): Promise<ProjectProfile> {
   let buildCommand: string | null = null;
   let typecheckCommand: string | null = null;
 
+  const hasScript = (scripts: Record<string, string>, name: string): boolean => {
+    const raw = scripts[name];
+    return typeof raw === "string" && raw.trim().length > 0;
+  };
+
   if (existsSync(packageJsonPath)) {
     languages.add("javascript");
     languages.add("typescript");
@@ -298,20 +303,20 @@ async function detectProfile(projectRoot: string): Promise<ProjectProfile> {
     if (deps.nest || deps["@nestjs/core"]) frameworks.add("nestjs");
 
     if (packageManager === "pnpm") {
-      testCommand = scripts.test ?? "pnpm test";
-      lintCommand = scripts.lint ?? "pnpm lint";
-      buildCommand = scripts.build ?? "pnpm build";
-      typecheckCommand = scripts.typecheck ?? "pnpm typecheck";
+      testCommand = hasScript(scripts, "test") ? "pnpm run test" : "pnpm test";
+      lintCommand = hasScript(scripts, "lint") ? "pnpm run lint" : null;
+      buildCommand = hasScript(scripts, "build") ? "pnpm run build" : null;
+      typecheckCommand = hasScript(scripts, "typecheck") ? "pnpm run typecheck" : null;
     } else if (packageManager === "yarn") {
-      testCommand = scripts.test ?? "yarn test";
-      lintCommand = scripts.lint ?? "yarn lint";
-      buildCommand = scripts.build ?? "yarn build";
-      typecheckCommand = scripts.typecheck ?? "yarn typecheck";
+      testCommand = hasScript(scripts, "test") ? "yarn test" : "yarn test";
+      lintCommand = hasScript(scripts, "lint") ? "yarn lint" : null;
+      buildCommand = hasScript(scripts, "build") ? "yarn build" : null;
+      typecheckCommand = hasScript(scripts, "typecheck") ? "yarn typecheck" : null;
     } else {
-      testCommand = scripts.test ?? "npm test";
-      lintCommand = scripts.lint ?? "npm run lint";
-      buildCommand = scripts.build ?? "npm run build";
-      typecheckCommand = scripts.typecheck ?? "npm run typecheck";
+      testCommand = hasScript(scripts, "test") ? "npm run test" : "npm test";
+      lintCommand = hasScript(scripts, "lint") ? "npm run lint" : null;
+      buildCommand = hasScript(scripts, "build") ? "npm run build" : null;
+      typecheckCommand = hasScript(scripts, "typecheck") ? "npm run typecheck" : null;
     }
   }
 
