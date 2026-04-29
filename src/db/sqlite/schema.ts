@@ -112,4 +112,11 @@ CREATE TABLE IF NOT EXISTS task_attempts (
 );
 `,
   },
+  {
+    id: "0004_snapshots_project_scope",
+    sql: `
+ALTER TABLE snapshots ADD COLUMN project_id TEXT;
+ALTER TABLE snapshots ADD COLUMN workspace_relative_path TEXT;
+`,
+  },
 ];

@@ -14,6 +14,7 @@ type LanceModule = {
 
 type LanceTable = {
   add?: (rows: unknown[]) => Promise<void>;
+  delete?: (where: string) => Promise<void>;
   search?: (vector: number[]) => { limit: (n: number) => { toArray: () => Promise<unknown[]> } };
 };
 
@@ -104,6 +105,35 @@ export async function clearVectorTable(
   }
 }
 
+function sqlQuote(value: string): string {
+  return `'${value.replace(/'/g, "''")}'`;
+}
+
+export async function clearVectorProject(
+  projectRoot: string,
+  projectId: string,
+): Promise<{ ok: boolean; status: VectorStoreStatus; reason?: string }> {
+  const tableState = await ensureVectorTable(projectRoot);
+  if (!tableState.ok) return { ok: false, status: tableState.status, reason: tableState.reason };
+  try {
+    const ctx = await getDb(projectRoot);
+    if (ctx.status.state !== "available") return { ok: false, status: ctx.status, reason: ctx.status.reason };
+    const table = (await ctx.db.openTable(TABLE_NAME)) as LanceTable;
+    if (!table.delete) {
+      return {
+        ok: false,
+        status: ctx.status,
+        reason: "project_scoped_vector_clear_unavailable",
+      };
+    }
+    await table.delete(`project_id = ${sqlQuote(projectId)}`);
+    return { ok: true, status: ctx.status };
+  } catch (error: unknown) {
+    const reason = error instanceof Error ? error.message : String(error);
+    return { ok: false, status: { state: "unavailable", enabled: false, reason }, reason };
+  }
+}
+
 export async function upsertVectors(
   projectRoot: string,
   rows: VectorIndexRow[],
@@ -137,6 +167,11 @@ export async function upsertVectors(
         failed_count: rows.length,
         status: { state: "unavailable", enabled: false, reason: "lancedb table.add unavailable" },
       };
+    }
+    if (table.delete) {
+      for (const row of rows) {
+        await table.delete(`id = ${sqlQuote(row.id)}`);
+      }
     }
     await table.add(rows);
     return { indexed_count: rows.length, failed_count: 0, status: ctx.status };

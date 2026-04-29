@@ -100,6 +100,8 @@ export type EmbeddingCacheEntry = {
 export type SnapshotRow = {
   id: string;
   task_run_id: string;
+  project_id: string | null;
+  workspace_relative_path: string | null;
   file_path: string;
   content_blob: Buffer;
   compression: "gzip" | "brotli";
@@ -630,6 +632,8 @@ export class SqliteStore {
 
   insertSnapshot(params: {
     task_run_id: string;
+    project_id: string;
+    workspace_relative_path: string;
     file_path: string;
     content_blob: Buffer;
     compression: "gzip" | "brotli";
@@ -639,9 +643,9 @@ export class SqliteStore {
       .prepare(
         `
       INSERT INTO snapshots (
-        id, task_run_id, file_path, content_blob, compression
+        id, task_run_id, project_id, workspace_relative_path, file_path, content_blob, compression
       ) VALUES (
-        @id, @task_run_id, @file_path, @content_blob, @compression
+        @id, @task_run_id, @project_id, @workspace_relative_path, @file_path, @content_blob, @compression
       )
     `,
       )
@@ -656,7 +660,7 @@ export class SqliteStore {
     const row = this.db
       .prepare(
         `
-      SELECT id, task_run_id, file_path, content_blob, compression, created_at
+      SELECT id, task_run_id, project_id, workspace_relative_path, file_path, content_blob, compression, created_at
       FROM snapshots
       WHERE id = ?
     `,

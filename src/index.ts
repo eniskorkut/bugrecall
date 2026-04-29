@@ -12,7 +12,7 @@ import { normalizeTerminalError } from "./engine/normalization/index.js";
 import type { CommandKind } from "./engine/normalization/types.js";
 import { getEmbeddingClient } from "./engine/embedding/embeddingClient.js";
 import { getEmbeddingConfig } from "./engine/embedding/config.js";
-import { clearVectorTable, ensureVectorTable, getVectorStoreStatus, upsertVectors } from "./db/vector/lanceStore.js";
+import { clearVectorProject, getVectorStoreStatus, upsertVectors } from "./db/vector/lanceStore.js";
 import { runHybridSearch } from "./engine/retrieval/hybridSearch.js";
 import {
   type CommitPostmortemInput,
@@ -790,7 +790,7 @@ export async function indexReadyMemories(
     }
 
     if (input.rebuild) {
-      const ensured = await clearVectorTable(data.repoRoot);
+      const ensured = await clearVectorProject(data.repoRoot, data.identity.project_id);
       if (!ensured.ok) {
         return {
           ok: true,
@@ -973,6 +973,8 @@ async function applySearchReplacePatch(
     const taskRunId = input.task_run_id ?? `local-${randomUUID()}`;
     const snapshotId = store.insertSnapshot({
       task_run_id: taskRunId,
+      project_id: data.identity.project_id,
+      workspace_relative_path: data.identity.workspace_relative_path,
       file_path: input.file_path,
       content_blob: compressSnapshot(content),
       compression: "gzip",
@@ -1009,6 +1011,22 @@ async function restoreSnapshot(cwd: string, input: { snapshot_id: string }): Pro
     const snapshot = store.getSnapshotById(input.snapshot_id);
     if (!snapshot) {
       return { success: false, reason: "snapshot_not_found", snapshot_id: input.snapshot_id };
+    }
+    if (!snapshot.project_id) {
+      return {
+        success: false,
+        reason: "legacy_snapshot_missing_project_id",
+        snapshot_id: input.snapshot_id,
+        file_path: snapshot.file_path,
+      };
+    }
+    if (snapshot.project_id !== data.identity.project_id) {
+      return {
+        success: false,
+        reason: "snapshot_project_mismatch",
+        snapshot_id: input.snapshot_id,
+        file_path: snapshot.file_path,
+      };
     }
     const safePath = resolveWorkspacePathSafely(data.workspaceRoot, snapshot.file_path);
     if (!safePath.ok) {
