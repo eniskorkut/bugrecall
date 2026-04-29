@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Bugrecall Dashboard</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <div class="logo">br</div>
+        <div>
+          <h1>Bugrecall</h1>
+          <p class="muted">Project Memory Console</p>
+        </div>
+      </div>
+      <div class="status-wrap">
+        <span class="pill">Local</span>
+        <span class="pill" id="project-status">Loading...</span>
+      </div>
+    </header>
+
+    <div id="banner" class="banner hidden"></div>
+
+    <div class="app-shell">
+      <aside class="sidebar">
+        <nav class="tabs">
+          <button class="tab active" data-tab="overview"><span>Overview</span></button>
+          <button class="tab" data-tab="search"><span>Search</span></button>
+          <button class="tab" data-tab="memories"><span>Memories</span></button>
+          <button class="tab" data-tab="vectorization"><span>Vectorization</span></button>
+          <button class="tab" data-tab="patch-history"><span>Patch History</span></button>
+          <button class="tab" data-tab="task-runs"><span>Task Runs</span></button>
+        </nav>
+      </aside>
+
+      <main class="layout">
+        <section class="panel active" id="panel-overview">
+          <div class="section-head">
+            <div>
+              <h2>Overview</h2>
+              <p id="project-line" class="muted">Loading project...</p>
+            </div>
+            <span class="soft-label" id="workspace-label">Workspace</span>
+          </div>
+          <div id="overview-cards" class="cards"></div>
+          <details class="details-box">
+            <summary>Raw overview JSON</summary>
+            <pre class="code" id="overview-data"></pre>
+          </details>
+        </section>
+
+      <section class="panel" id="panel-search">
+        <div class="section-head">
+          <div>
+            <h2>Search</h2>
+            <p class="muted">Find prior incidents, decisions, and facts.</p>
+          </div>
+        </div>
+        <div class="row">
+          <input id="search-q" placeholder="Search memory..." />
+          <select id="search-mode">
+            <option value="auto">auto</option>
+            <option value="text">text</option>
+            <option value="hybrid">hybrid</option>
+            <option value="vector">vector</option>
+          </select>
+          <button id="search-btn" class="btn primary">Search</button>
+        </div>
+        <div id="search-empty" class="empty">No search yet.</div>
+        <div id="search-results" class="list"></div>
+      </section>
+
+      <section class="panel" id="panel-memories">
+        <div class="section-head">
+          <div>
+            <h2>Memories</h2>
+            <p class="muted">Current project records only.</p>
+          </div>
+        </div>
+        <div class="row">
+          <input id="flt-type" placeholder="type" />
+          <input id="flt-status" placeholder="status" />
+          <input id="flt-language" placeholder="language" />
+          <input id="flt-toolchain" placeholder="toolchain" />
+          <input id="flt-error" placeholder="error_class" />
+          <button id="reload-memories" class="btn secondary">Reload</button>
+        </div>
+        <div class="table-wrap">
+          <table id="memory-table">
+            <thead>
+              <tr>
+                <th>ID</th><th>Type</th><th>Status</th><th>Confidence</th><th>Language</th><th>Toolchain</th><th>Error Class</th><th>Hits</th><th>Created</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <div id="memory-empty" class="empty hidden">No memory records found.</div>
+        <div class="detail-panel" id="memory-detail">Click a row for details.</div>
+      </section>
+
+      <section class="panel" id="panel-vectorization">
+        <div class="section-head">
+          <div>
+            <h2>Vectorization</h2>
+            <p class="muted">Embedding cache and optional vector index maintenance.</p>
+          </div>
+        </div>
+        <div class="row">
+          <button id="vectorize-btn" class="btn primary">Vectorize Pending</button>
+          <button id="index-btn" class="btn secondary">Index Ready Memories</button>
+        </div>
+        <pre class="code" id="vector-status"></pre>
+      </section>
+
+      <section class="panel" id="panel-patch-history">
+        <div class="section-head">
+          <div>
+            <h2>Patch History</h2>
+            <p class="muted">Search/replace patch attempts and outcomes.</p>
+          </div>
+        </div>
+        <div id="patch-data"></div>
+      </section>
+
+      <section class="panel" id="panel-task-runs">
+        <div class="section-head">
+          <div>
+            <h2>Task Runs</h2>
+            <p class="muted">Structured task sessions and logged attempts.</p>
+          </div>
+        </div>
+        <div id="task-data"></div>
+        <pre class="code" id="task-attempts">Select task run to see attempts.</pre>
+      </section>
+      </main>
+    </div>
+    <script src="/app.js"></script>
+  </body>
+</html>

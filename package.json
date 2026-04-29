@@ -1,0 +1,43 @@
+{
+  "name": "project-memory-agent",
+  "version": "0.1.0",
+  "private": true,
+  "description": "TypeScript MCP server scaffold for project memory agent",
+  "type": "module",
+  "bin": {
+    "pma": "./bin/pma.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsx watch src/index.ts",
+    "dashboard:dev": "tsx src/cli.ts dashboard",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "phase2:check": "tsx src/scripts/phase2-check.ts",
+    "phase3:check": "tsx src/scripts/phase3-check.ts",
+    "phase3:quality": "tsx src/scripts/phase3-quality-check.ts",
+    "phase4:check": "tsx src/scripts/phase4-check.ts",
+    "phase5a:check": "tsx src/scripts/phase5a-check.ts",
+    "phase5b:check": "tsx src/scripts/phase5b-check.ts",
+    "phase6:check": "tsx src/scripts/phase6-check.ts",
+    "phase7:check": "tsx src/scripts/phase7-check.ts",
+    "phase8:check": "tsx src/scripts/phase8-check.ts",
+    "phase9a:check": "tsx src/scripts/phase9a-check.ts",
+    "phase9b:check": "tsx src/scripts/phase9b-check.ts",
+    "phase10:check": "tsx src/scripts/phase10-check.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "@huggingface/transformers": "^3.7.6",
+    "better-sqlite3": "^11.8.1",
+    "zod": "^3.24.1"
+  },
+  "optionalDependencies": {
+    "@lancedb/lancedb": "^0.17.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.12",
+    "@types/node": "^22.15.17",
+    "tsx": "^4.19.3",
+    "typescript": "^5.8.3"
+  }
+}

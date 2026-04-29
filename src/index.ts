@@ -1,0 +1,1983 @@
+import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+import { execFileSync, spawn } from "node:child_process";
+import { createHash, randomUUID } from "node:crypto";
+import { existsSync } from "node:fs";
+import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import path from "node:path";
+import { gunzipSync, gzipSync } from "node:zlib";
+import { z } from "zod";
+import { normalizeTerminalError } from "./engine/normalization/index.js";
+import type { CommandKind } from "./engine/normalization/types.js";
+import { getEmbeddingClient } from "./engine/embedding/embeddingClient.js";
+import { getEmbeddingConfig } from "./engine/embedding/config.js";
+import { clearVectorTable, ensureVectorTable, getVectorStoreStatus, upsertVectors } from "./db/vector/lanceStore.js";
+import { runHybridSearch } from "./engine/retrieval/hybridSearch.js";
+import {
+  type CommitPostmortemInput,
+  type ProjectIdentityRow,
+  type ProjectProfileRow,
+  type SearchExperienceFilters,
+  type StructuredCommand,
+  type TaskBudget,
+  SqliteStore,
+} from "./db/sqlite/store.js";
+
+const server = new Server(
+  {
+    name: "project-memory-agent",
+    version: "0.2.0",
+  },
+  {
+    capabilities: {
+      tools: {},
+    },
+  },
+);
+
+type ProjectProfile = ProjectProfileRow;
+
+type ProjectIdentity = ProjectIdentityRow;
+
+const readProjectMemoryInputSchema = z
+  .object({
+    type: z.enum(["incident", "fact", "decision"]).optional(),
+    limit: z.number().int().min(1).max(100).optional().default(10),
+  })
+  .strict();
+
+const commitPostmortemInputSchema = z
+  .object({
+    type: z.enum(["incident", "fact", "decision"]).default("incident"),
+    scope: z.enum(["workspace-only", "project-only", "repo-family"]).default("workspace-only"),
+    content: z.string().min(1),
+    confidence: z.number().min(0).max(1).default(0.8),
+    metadata: z.record(z.unknown()).default({}),
+  })
+  .strict();
+
+const ingestTerminalErrorInputSchema = z
+  .object({
+    raw_log: z.string().min(1),
+    command_kind: z.enum(["test", "lint", "build", "typecheck", "run", "unknown"]).optional(),
+    workspace: z.string().optional(),
+    files: z.array(z.string()).optional(),
+  })
+  .strict();
+
+const searchProjectExperienceInputSchema = z
+  .object({
+    query: z.string().min(1),
+    filters: z
+      .object({
+        type: z.enum(["incident", "fact", "decision"]).optional(),
+        workspace: z.string().optional(),
+        toolchain: z.string().optional(),
+        language: z.string().optional(),
+        error_class: z.string().optional(),
+        min_confidence: z.number().min(0).max(1).optional(),
+      })
+      .optional(),
+    limit: z.number().int().min(1).max(50).optional().default(5),
+    mode: z.enum(["auto", "text", "vector", "hybrid"]).optional().default("auto"),
+  })
+  .strict();
+
+const vectorizePendingMemoriesInputSchema = z
+  .object({
+    limit: z.number().int().min(1).max(50).optional().default(10),
+    retry_failed: z.boolean().optional().default(false),
+  })
+  .strict();
+
+const getVectorizationStatusInputSchema = z
+  .object({
+    limit: z.number().int().min(1).max(1000).optional(),
+  })
+  .strict();
+
+const indexReadyMemoriesInputSchema = z
+  .object({
+    limit: z.number().int().min(1).max(500).optional().default(50),
+    rebuild: z.boolean().optional().default(false),
+  })
+  .strict();
+
+const applySearchReplacePatchInputSchema = z
+  .object({
+    file_path: z.string().min(1),
+    search_block: z.string().min(1),
+    replace_block: z.string(),
+    task_run_id: z.string().optional(),
+  })
+  .strict();
+
+const restoreSnapshotInputSchema = z
+  .object({
+    snapshot_id: z.string().min(1),
+  })
+  .strict();
+
+const startTaskRunInputSchema = z
+  .object({
+    task_text: z.string().min(1),
+    approval_budget: z
+      .object({
+        max_total_command_runs: z.number().int().min(1).max(100).optional().default(5),
+        max_test_runs: z.number().int().min(1).max(100).optional().default(5),
+        max_lint_runs: z.number().int().min(1).max(100).optional().default(3),
+        max_build_runs: z.number().int().min(1).max(100).optional().default(3),
+        max_typecheck_runs: z.number().int().min(1).max(100).optional().default(3),
+        timeout_ms: z.number().int().min(1000).max(300000).optional().default(30000),
+      })
+      .optional(),
+  })
+  .strict();
+
+const getTaskRunInputSchema = z
+  .object({
+    task_run_id: z.string().min(1),
+  })
+  .strict();
+
+const runProjectCommandInputSchema = z
+  .object({
+    task_run_id: z.string().min(1),
+    kind: z.enum(["test", "lint", "build", "typecheck"]),
+  })
+  .strict();
+
+const logAttemptInputSchema = z
+  .object({
+    task_run_id: z.string().min(1),
+    kind: z.enum(["patch", "command", "reasoning", "memory"]),
+    summary: z.string().min(1),
+    success: z.boolean(),
+    metadata: z.record(z.unknown()).optional().default({}),
+  })
+  .strict();
+
+const createDebugSessionInputSchema = z
+  .object({
+    task_text: z.string().min(1),
+    initial_context: z.string().optional(),
+    approval_budget: startTaskRunInputSchema.shape.approval_budget,
+  })
+  .strict();
+
+const recordErrorObservationInputSchema = z
+  .object({
+    task_run_id: z.string().min(1),
+    raw_output: z.string().min(1),
+    command_kind: z.enum(["test", "lint", "build", "typecheck", "manual"]).optional(),
+    context: z.record(z.unknown()).optional().default({}),
+  })
+  .strict();
+
+const suggestNextActionsInputSchema = z
+  .object({
+    task_run_id: z.string().min(1),
+    normalized_error: z.record(z.unknown()).optional(),
+    query: z.string().optional(),
+    limit: z.number().int().min(1).max(20).optional().default(5),
+  })
+  .strict();
+
+const finalizeSuccessfulFixInputSchema = z
+  .object({
+    task_run_id: z.string().min(1),
+    summary: z.string().min(1),
+    root_cause: z.string().min(1),
+    fix_pattern: z.string().min(1),
+    symptoms: z.array(z.string()).optional(),
+    anti_patterns: z.array(z.string()).optional(),
+    verification_steps: z.array(z.string()).optional(),
+    files_changed: z.array(z.string()).optional(),
+    error_class: z.string().optional(),
+    language: z.string().optional(),
+    toolchain: z.string().optional(),
+    workspace: z.string().optional(),
+    confidence: z.number().min(0).max(1).optional().default(0.9),
+  })
+  .strict();
+
+const failDebugSessionInputSchema = z
+  .object({
+    task_run_id: z.string().min(1),
+    reason: z.string().min(1),
+    summary: z.string().optional(),
+  })
+  .strict();
+
+function sha256(input: string): string {
+  return createHash("sha256").update(input).digest("hex");
+}
+
+function runGit(args: string[], cwd: string): string | null {
+  try {
+    return execFileSync("git", args, {
+      cwd,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+  } catch {
+    return null;
+  }
+}
+
+function detectGitRoot(cwd: string): string {
+  const root = runGit(["rev-parse", "--show-toplevel"], cwd);
+  return root ?? cwd;
+}
+
+function toPosixRelative(base: string, target: string): string {
+  const rel = path.relative(base, target);
+  if (!rel || rel === "") {
+    return ".";
+  }
+  return rel.split(path.sep).join("/");
+}
+
+async function detectManifestFingerprint(projectRoot: string): Promise<string | null> {
+  const packageJsonPath = path.join(projectRoot, "package.json");
+  const pyprojectPath = path.join(projectRoot, "pyproject.toml");
+
+  if (existsSync(packageJsonPath)) {
+    return sha256(await readFile(packageJsonPath, "utf8"));
+  }
+
+  if (existsSync(pyprojectPath)) {
+    return sha256(await readFile(pyprojectPath, "utf8"));
+  }
+
+  return null;
+}
+
+async function detectProfile(projectRoot: string): Promise<ProjectProfile> {
+  const packageJsonPath = path.join(projectRoot, "package.json");
+  const pyprojectPath = path.join(projectRoot, "pyproject.toml");
+  const requirementsPath = path.join(projectRoot, "requirements.txt");
+  const pnpmLockPath = path.join(projectRoot, "pnpm-lock.yaml");
+  const yarnLockPath = path.join(projectRoot, "yarn.lock");
+  const uvLockPath = path.join(projectRoot, "uv.lock");
+
+  const languages = new Set<string>();
+  const frameworks = new Set<string>();
+  let packageManager: string | null = null;
+  let testCommand: string | null = null;
+  let lintCommand: string | null = null;
+  let buildCommand: string | null = null;
+  let typecheckCommand: string | null = null;
+
+  if (existsSync(packageJsonPath)) {
+    languages.add("javascript");
+    languages.add("typescript");
+    packageManager = "npm";
+    if (existsSync(pnpmLockPath)) packageManager = "pnpm";
+    if (existsSync(yarnLockPath)) packageManager = "yarn";
+
+    const packageJson = JSON.parse(await readFile(packageJsonPath, "utf8")) as {
+      dependencies?: Record<string, string>;
+      devDependencies?: Record<string, string>;
+      scripts?: Record<string, string>;
+    };
+
+    const deps = {
+      ...(packageJson.dependencies ?? {}),
+      ...(packageJson.devDependencies ?? {}),
+    };
+    const scripts = packageJson.scripts ?? {};
+
+    if (deps.fastify || deps["@fastify/fastify"]) frameworks.add("fastify");
+    if (deps.express) frameworks.add("express");
+    if (deps.next) frameworks.add("nextjs");
+    if (deps.react) frameworks.add("react");
+    if (deps.vue) frameworks.add("vue");
+    if (deps.svelte) frameworks.add("svelte");
+    if (deps.nest || deps["@nestjs/core"]) frameworks.add("nestjs");
+
+    if (packageManager === "pnpm") {
+      testCommand = scripts.test ?? "pnpm test";
+      lintCommand = scripts.lint ?? "pnpm lint";
+      buildCommand = scripts.build ?? "pnpm build";
+      typecheckCommand = scripts.typecheck ?? "pnpm typecheck";
+    } else if (packageManager === "yarn") {
+      testCommand = scripts.test ?? "yarn test";
+      lintCommand = scripts.lint ?? "yarn lint";
+      buildCommand = scripts.build ?? "yarn build";
+      typecheckCommand = scripts.typecheck ?? "yarn typecheck";
+    } else {
+      testCommand = scripts.test ?? "npm test";
+      lintCommand = scripts.lint ?? "npm run lint";
+      buildCommand = scripts.build ?? "npm run build";
+      typecheckCommand = scripts.typecheck ?? "npm run typecheck";
+    }
+  }
+
+  if (existsSync(pyprojectPath) || existsSync(requirementsPath)) {
+    languages.add("python");
+    if (existsSync(pyprojectPath)) {
+      const pyproject = (await readFile(pyprojectPath, "utf8")).toLowerCase();
+      if (pyproject.includes("fastapi")) frameworks.add("fastapi");
+      if (pyproject.includes("django")) frameworks.add("django");
+      if (pyproject.includes("flask")) frameworks.add("flask");
+      if (pyproject.includes("poetry")) packageManager = packageManager ?? "poetry";
+    }
+    if (existsSync(uvLockPath)) packageManager = packageManager ?? "uv";
+    packageManager = packageManager ?? "pip";
+    testCommand = testCommand ?? "pytest";
+    lintCommand = lintCommand ?? "ruff check .";
+    buildCommand = buildCommand ?? "python -m build";
+    typecheckCommand = typecheckCommand ?? "mypy .";
+  }
+
+  return {
+    languages: [...languages],
+    frameworks: [...frameworks],
+    package_manager: packageManager,
+    test_command: testCommand,
+    lint_command: lintCommand,
+    build_command: buildCommand,
+    typecheck_command: typecheckCommand,
+  };
+}
+
+async function isAgentIgnored(projectRoot: string): Promise<boolean> {
+  const gitIgnorePath = path.join(projectRoot, ".gitignore");
+  if (!existsSync(gitIgnorePath)) return false;
+  const lines = (await readFile(gitIgnorePath, "utf8"))
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0 && !line.startsWith("#"));
+  return lines.includes(".agent") || lines.includes(".agent/");
+}
+
+export async function buildIdentityAndProfile(cwd: string): Promise<{
+  identity: ProjectIdentity;
+  profile: ProjectProfile;
+  warnings: string[];
+  projectRoot: string;
+}> {
+  const projectRoot = detectGitRoot(cwd);
+  const workspaceRelativePath = toPosixRelative(projectRoot, cwd);
+  const remoteUrl = runGit(["remote", "get-url", "origin"], projectRoot);
+  const gitRemoteHash = remoteUrl ? sha256(remoteUrl) : null;
+  const initialCommitHash =
+    runGit(["rev-list", "--max-parents=0", "HEAD"], projectRoot)?.split(/\s+/)[0] ?? null;
+  const manifestFingerprint = await detectManifestFingerprint(projectRoot);
+  const profile = await detectProfile(projectRoot);
+
+  const projectId = sha256(
+    [
+      gitRemoteHash ?? "no-remote",
+      initialCommitHash ?? "no-initial-commit",
+      workspaceRelativePath,
+      manifestFingerprint ?? "no-manifest",
+    ].join("|"),
+  );
+
+  const warnings: string[] = [];
+  if (!(await isAgentIgnored(projectRoot))) {
+    warnings.push(".agent/ is not listed in .gitignore");
+  }
+
+  return {
+    identity: {
+      project_id: projectId,
+      git_remote_hash: gitRemoteHash,
+      initial_commit_hash: initialCommitHash,
+      workspace_relative_path: workspaceRelativePath,
+      manifest_fingerprint: manifestFingerprint,
+    },
+    profile,
+    warnings,
+    projectRoot,
+  };
+}
+
+export async function ensureStore(projectRoot: string): Promise<{ store: SqliteStore; dbPath: string; migrations: string[] }> {
+  const agentDir = path.join(projectRoot, ".agent");
+  const dbPath = path.join(agentDir, "memory.db");
+  await mkdir(agentDir, { recursive: true });
+  const store = new SqliteStore(dbPath);
+  const migrations = store.runMigrations();
+  return { store, dbPath, migrations };
+}
+
+function defaultTaskBudget(input?: Partial<TaskBudget>): TaskBudget {
+  return {
+    max_total_command_runs: input?.max_total_command_runs ?? 5,
+    max_test_runs: input?.max_test_runs ?? 5,
+    max_lint_runs: input?.max_lint_runs ?? 3,
+    max_build_runs: input?.max_build_runs ?? 3,
+    max_typecheck_runs: input?.max_typecheck_runs ?? 3,
+    timeout_ms: input?.timeout_ms ?? 30000,
+  };
+}
+
+function clampTail(input: string, maxChars = 4000): string {
+  if (input.length <= maxChars) return input;
+  return input.slice(input.length - maxChars);
+}
+
+function hasUnsafeShellTokens(command: string): boolean {
+  return /(;|&&|\|\||\||>|<|`|\$\(|\n|\r)/.test(command);
+}
+
+function parseStructuredCommand(command: string): { ok: true; value: StructuredCommand } | { ok: false; reason: string } {
+  const normalized = command.trim();
+  if (!normalized) return { ok: false, reason: "command_not_configured" };
+  if (hasUnsafeShellTokens(normalized)) return { ok: false, reason: "unsafe_command_profile" };
+  const parts = normalized.split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return { ok: false, reason: "command_not_configured" };
+  return {
+    ok: true,
+    value: {
+      cmd: parts[0],
+      args: parts.slice(1),
+      cwd: ".",
+      source: "project_profile",
+    },
+  };
+}
+
+function remainingBudget(budget: TaskBudget, usage: Record<string, number>): Record<string, number> {
+  return {
+    total: Math.max(0, budget.max_total_command_runs - Number(usage.total ?? 0)),
+    test: Math.max(0, budget.max_test_runs - Number(usage.test ?? 0)),
+    lint: Math.max(0, budget.max_lint_runs - Number(usage.lint ?? 0)),
+    build: Math.max(0, budget.max_build_runs - Number(usage.build ?? 0)),
+    typecheck: Math.max(0, budget.max_typecheck_runs - Number(usage.typecheck ?? 0)),
+  };
+}
+
+function workflowSteps(): string[] {
+  return [
+    "record_error_observation",
+    "search_project_experience",
+    "apply_search_replace_patch",
+    "run_project_command",
+    "finalize_successful_fix",
+  ];
+}
+
+function verifyTaskRunForProject(
+  store: SqliteStore,
+  taskRunId: string,
+  projectId: string,
+): { ok: true; taskRun: NonNullable<ReturnType<SqliteStore["getTaskRunById"]>> } | { ok: false; body: Record<string, unknown> } {
+  const taskRun = store.getTaskRunById(taskRunId);
+  if (!taskRun) return { ok: false, body: { ok: false, reason: "task_run_not_found", task_run_id: taskRunId } };
+  if (taskRun.project_id !== projectId) {
+    return { ok: false, body: { ok: false, reason: "task_run_project_mismatch", task_run_id: taskRunId } };
+  }
+  return { ok: true, taskRun };
+}
+
+function suggestedSearchQuery(normalized: ReturnType<typeof normalizeTerminalError>): string {
+  return [normalized.error_class, normalized.detected_toolchain, normalized.detected_language, normalized.normalized_error]
+    .filter(Boolean)
+    .join(" ")
+    .slice(0, 500);
+}
+
+function deterministicActions(normalized?: Record<string, unknown>): string[] {
+  const language = String(normalized?.detected_language ?? normalized?.language ?? "");
+  const toolchain = String(normalized?.detected_toolchain ?? normalized?.toolchain ?? "");
+  const actions = [
+    "Inspect files mentioned in the traceback or compiler output.",
+    "Check whether a previous fix pattern applies before editing.",
+    "Apply a Search/Replace patch only with an exact unique block.",
+  ];
+  if (language === "typescript" || toolchain === "tsc" || toolchain === "nextjs") {
+    actions.push("Run typecheck after editing TypeScript files.");
+  }
+  if (toolchain === "pytest" || language === "python") {
+    actions.push("Run test after editing backend logic.");
+  }
+  actions.push("Finalize the fix only after verification passes.");
+  return actions;
+}
+
+function commandRecommendation(normalized?: Record<string, unknown>): string | null {
+  const language = String(normalized?.detected_language ?? normalized?.language ?? "");
+  const toolchain = String(normalized?.detected_toolchain ?? normalized?.toolchain ?? "");
+  if (toolchain === "eslint") return "lint";
+  if (toolchain === "tsc" || toolchain === "nextjs" || language === "typescript") return "typecheck";
+  if (toolchain === "pytest" || language === "python") return "test";
+  return null;
+}
+
+async function runStructuredCommand(
+  cmd: string,
+  args: string[],
+  cwd: string,
+  timeoutMs: number,
+): Promise<{ exit_code: number | null; signal: string | null; stdout: string; stderr: string; duration_ms: number }> {
+  const t0 = Date.now();
+  return await new Promise((resolve) => {
+    const child = spawn(cmd, args, { cwd, shell: false });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk.toString();
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString();
+    });
+    let timeoutHit = false;
+    const timer = setTimeout(() => {
+      timeoutHit = true;
+      child.kill("SIGKILL");
+    }, timeoutMs);
+
+    child.on("close", (code, signal) => {
+      clearTimeout(timer);
+      resolve({
+        exit_code: timeoutHit ? null : code,
+        signal: timeoutHit ? "SIGKILL" : signal,
+        stdout,
+        stderr,
+        duration_ms: Date.now() - t0,
+      });
+    });
+
+    child.on("error", (error) => {
+      clearTimeout(timer);
+      resolve({
+        exit_code: null,
+        signal: "SPAWN_ERROR",
+        stdout,
+        stderr: `${stderr}\n${error.message}`.trim(),
+        duration_ms: Date.now() - t0,
+      });
+    });
+  });
+}
+
+async function bootstrapProject(cwd: string): Promise<Record<string, unknown>> {
+  const data = await buildIdentityAndProfile(cwd);
+  const { store, migrations } = await ensureStore(data.projectRoot);
+  try {
+    store.upsertProject(data.identity);
+    store.upsertProjectProfile(data.identity.project_id, data.profile);
+  } finally {
+    store.close();
+  }
+
+  return {
+    ok: true,
+    tool: "bootstrap_project",
+    identity: data.identity,
+    profile: data.profile,
+    sqlite_file: ".agent/memory.db",
+    migrations_applied: migrations,
+    warnings: data.warnings,
+  };
+}
+
+async function getProjectProfile(cwd: string): Promise<Record<string, unknown>> {
+  const data = await buildIdentityAndProfile(cwd);
+  return {
+    ok: true,
+    tool: "get_project_profile",
+    identity: data.identity,
+    profile: data.profile,
+    warnings: data.warnings,
+  };
+}
+
+async function commitPostmortem(cwd: string, input: CommitPostmortemInput): Promise<Record<string, unknown>> {
+  const data = await buildIdentityAndProfile(cwd);
+  const { store } = await ensureStore(data.projectRoot);
+  try {
+    store.upsertProject(data.identity);
+    store.upsertProjectProfile(data.identity.project_id, data.profile);
+    const inserted = store.insertMemoryRecord(data.identity.project_id, input);
+    return {
+      ok: true,
+      tool: "commit_postmortem",
+      project_id: data.identity.project_id,
+      record_id: inserted.id,
+      status: inserted.status,
+    };
+  } finally {
+    store.close();
+  }
+}
+
+async function readProjectMemory(
+  cwd: string,
+  input: { type?: "incident" | "fact" | "decision"; limit: number },
+): Promise<Record<string, unknown>> {
+  const data = await buildIdentityAndProfile(cwd);
+  const { store } = await ensureStore(data.projectRoot);
+  try {
+    const records = store.readProjectMemory(data.identity.project_id, input.type, input.limit);
+    return {
+      ok: true,
+      tool: "read_project_memory",
+      project_id: data.identity.project_id,
+      count: records.length,
+      records,
+    };
+  } finally {
+    store.close();
+  }
+}
+
+async function ingestTerminalError(
+  cwd: string,
+  input: { raw_log: string; command_kind?: CommandKind; workspace?: string; files?: string[] },
+): Promise<Record<string, unknown>> {
+  const data = await buildIdentityAndProfile(cwd);
+  const normalized = normalizeTerminalError(input.raw_log, {
+    command_kind: input.command_kind ?? "unknown",
+    workspace: input.workspace,
+    files: input.files,
+  });
+
+  return {
+    ok: true,
+    tool: "ingest_terminal_error",
+    project_id: data.identity.project_id,
+    ...normalized,
+    metadata: {
+      ...normalized.metadata,
+      workspace: input.workspace ?? data.identity.workspace_relative_path,
+      memory_written: false,
+    },
+  };
+}
+
+export async function searchProjectExperience(
+  cwd: string,
+  input: { query: string; filters?: SearchExperienceFilters; limit: number; mode: "auto" | "text" | "vector" | "hybrid" },
+): Promise<Record<string, unknown>> {
+  const data = await buildIdentityAndProfile(cwd);
+  const { store } = await ensureStore(data.projectRoot);
+  const config = getEmbeddingConfig();
+  const embeddingClient = getEmbeddingClient();
+  try {
+    let queryVector: number[] | null = null;
+    if (input.mode !== "text" && config.embeddings_enabled) {
+      try {
+        const embedded = await embeddingClient.embed("query", input.query, config.model, config.timeout_ms);
+        queryVector = embedded.vector;
+      } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : String(error);
+        console.error(`[search] query embedding failed: ${message}`);
+      }
+    }
+
+    const hybrid = await runHybridSearch({
+      projectRoot: data.projectRoot,
+      projectId: data.identity.project_id,
+      query: input.query,
+      filters: input.filters ?? {},
+      limit: input.limit,
+      mode: input.mode,
+      queryVector,
+      store,
+    });
+    return {
+      ok: true,
+      tool: "search_project_experience",
+      project_id: data.identity.project_id,
+      query: input.query,
+      mode_requested: input.mode,
+      mode_used: hybrid.mode_used,
+      vector_search_enabled: hybrid.vector_search_enabled,
+      vector_store_status: hybrid.vector_store_status,
+      note: hybrid.note,
+      count: hybrid.results.length,
+      results: hybrid.results,
+    };
+  } finally {
+    store.close();
+  }
+}
+
+export async function indexReadyMemories(
+  cwd: string,
+  input: { limit: number; rebuild: boolean },
+): Promise<Record<string, unknown>> {
+  const data = await buildIdentityAndProfile(cwd);
+  const { store } = await ensureStore(data.projectRoot);
+  try {
+    const vectorStatus = await getVectorStoreStatus();
+    if (vectorStatus.state !== "available") {
+      return {
+        ok: true,
+        tool: "index_ready_memories",
+        project_id: data.identity.project_id,
+        indexed_count: 0,
+        skipped_count: 0,
+        failed_count: 0,
+        vector_search_enabled: false,
+        vector_store_status: vectorStatus,
+      };
+    }
+
+    if (input.rebuild) {
+      const ensured = await clearVectorTable(data.projectRoot);
+      if (!ensured.ok) {
+        return {
+          ok: true,
+          tool: "index_ready_memories",
+          project_id: data.identity.project_id,
+          indexed_count: 0,
+          skipped_count: 0,
+          failed_count: 0,
+          vector_search_enabled: false,
+          vector_store_status: ensured.status,
+          note: ensured.reason,
+        };
+      }
+    }
+
+    const ready = store.listReadyRecordsWithEmbeddings(data.identity.project_id, input.limit);
+    const rows = ready.map((row) => ({
+      id: row.id,
+      project_id: row.project_id,
+      type: row.type,
+      workspace: typeof row.metadata.workspace === "string" ? row.metadata.workspace : null,
+      toolchain: typeof row.metadata.toolchain === "string" ? row.metadata.toolchain : null,
+      language: typeof row.metadata.language === "string" ? row.metadata.language : null,
+      error_class: typeof row.metadata.error_class === "string" ? row.metadata.error_class : null,
+      model: row.model,
+      dimension: row.dimension,
+      vector: Array.from(row.vector),
+    }));
+
+    const result = await upsertVectors(data.projectRoot, rows);
+    return {
+      ok: true,
+      tool: "index_ready_memories",
+      project_id: data.identity.project_id,
+      indexed_count: result.indexed_count,
+      skipped_count: Math.max(0, ready.length - result.indexed_count - result.failed_count),
+      failed_count: result.failed_count,
+      vector_search_enabled: result.status.state === "available",
+      vector_store_status: result.status,
+      note: result.reason,
+    };
+  } finally {
+    store.close();
+  }
+}
+
+function resolveWorkspacePathSafely(workspaceRoot: string, filePath: string): { ok: true; fullPath: string } | { ok: false; reason: string } {
+  if (path.isAbsolute(filePath)) return { ok: false, reason: "absolute_path_rejected" };
+  const normalizedInput = filePath.replace(/\\/g, "/");
+  if (normalizedInput.startsWith("../") || normalizedInput.includes("/../") || normalizedInput === "..") {
+    return { ok: false, reason: "path_traversal_rejected" };
+  }
+  const resolved = path.resolve(workspaceRoot, filePath);
+  const relative = path.relative(workspaceRoot, resolved);
+  if (relative.startsWith("..") || path.isAbsolute(relative)) {
+    return { ok: false, reason: "path_traversal_rejected" };
+  }
+  return { ok: true, fullPath: resolved };
+}
+
+function countExactOccurrences(content: string, searchBlock: string): number {
+  if (searchBlock.length === 0) return 0;
+  let count = 0;
+  let pos = 0;
+  while (true) {
+    const idx = content.indexOf(searchBlock, pos);
+    if (idx === -1) break;
+    count += 1;
+    pos = idx + searchBlock.length;
+  }
+  return count;
+}
+
+function applyExactReplacement(content: string, searchBlock: string, replaceBlock: string): string {
+  const idx = content.indexOf(searchBlock);
+  if (idx < 0) return content;
+  return `${content.slice(0, idx)}${replaceBlock}${content.slice(idx + searchBlock.length)}`;
+}
+
+function compressSnapshot(content: string): Buffer {
+  return gzipSync(Buffer.from(content, "utf8"));
+}
+
+function decompressSnapshot(compression: "gzip" | "brotli", blob: Buffer): string {
+  if (compression === "gzip") return gunzipSync(blob).toString("utf8");
+  throw new Error(`Unsupported compression: ${compression}`);
+}
+
+async function applySearchReplacePatch(
+  cwd: string,
+  input: { file_path: string; search_block: string; replace_block: string; task_run_id?: string },
+): Promise<Record<string, unknown>> {
+  const data = await buildIdentityAndProfile(cwd);
+  const { store } = await ensureStore(data.projectRoot);
+  try {
+    const safePath = resolveWorkspacePathSafely(cwd, input.file_path);
+    if (!safePath.ok) {
+      const patchId = store.insertPatchHistory({
+        task_run_id: input.task_run_id ?? `local-${randomUUID()}`,
+        project_id: data.identity.project_id,
+        file_path: input.file_path,
+        search_block: input.search_block,
+        replace_block: input.replace_block,
+        match_count: 0,
+        success_flag: 0,
+        reason: safePath.reason,
+      });
+      return {
+        success: false,
+        file_path: input.file_path,
+        match_count: 0,
+        reason: safePath.reason,
+        patch_history_id: patchId,
+      };
+    }
+
+    const fileStat = await stat(safePath.fullPath).catch(() => null);
+    if (!fileStat || !fileStat.isFile()) {
+      const patchId = store.insertPatchHistory({
+        task_run_id: input.task_run_id ?? `local-${randomUUID()}`,
+        project_id: data.identity.project_id,
+        file_path: input.file_path,
+        search_block: input.search_block,
+        replace_block: input.replace_block,
+        match_count: 0,
+        success_flag: 0,
+        reason: "file_not_found_or_not_regular",
+      });
+      return {
+        success: false,
+        file_path: input.file_path,
+        match_count: 0,
+        reason: "file_not_found_or_not_regular",
+        patch_history_id: patchId,
+      };
+    }
+
+    const content = await readFile(safePath.fullPath, "utf8");
+    const matchCount = countExactOccurrences(content, input.search_block);
+    if (matchCount === 0) {
+      const patchId = store.insertPatchHistory({
+        task_run_id: input.task_run_id ?? `local-${randomUUID()}`,
+        project_id: data.identity.project_id,
+        file_path: input.file_path,
+        search_block: input.search_block,
+        replace_block: input.replace_block,
+        match_count: 0,
+        success_flag: 0,
+        reason: "no_exact_match",
+      });
+      return {
+        success: false,
+        file_path: input.file_path,
+        match_count: 0,
+        reason: "no_exact_match",
+        patch_history_id: patchId,
+      };
+    }
+    if (matchCount > 1) {
+      const patchId = store.insertPatchHistory({
+        task_run_id: input.task_run_id ?? `local-${randomUUID()}`,
+        project_id: data.identity.project_id,
+        file_path: input.file_path,
+        search_block: input.search_block,
+        replace_block: input.replace_block,
+        match_count: matchCount,
+        success_flag: 0,
+        reason: "multiple_matches",
+      });
+      return {
+        success: false,
+        file_path: input.file_path,
+        match_count: matchCount,
+        reason: "multiple_matches",
+        guidance: "Use a larger surrounding context in search_block",
+        patch_history_id: patchId,
+      };
+    }
+
+    const taskRunId = input.task_run_id ?? `local-${randomUUID()}`;
+    const snapshotId = store.insertSnapshot({
+      task_run_id: taskRunId,
+      file_path: input.file_path,
+      content_blob: compressSnapshot(content),
+      compression: "gzip",
+    });
+    const replaced = applyExactReplacement(content, input.search_block, input.replace_block);
+    await writeFile(safePath.fullPath, replaced, "utf8");
+    const patchId = store.insertPatchHistory({
+      task_run_id: taskRunId,
+      project_id: data.identity.project_id,
+      file_path: input.file_path,
+      search_block: input.search_block,
+      replace_block: input.replace_block,
+      match_count: 1,
+      success_flag: 1,
+      reason: "applied",
+    });
+    return {
+      success: true,
+      file_path: input.file_path,
+      match_count: 1,
+      reason: "applied",
+      patch_history_id: patchId,
+      snapshot_id: snapshotId,
+    };
+  } finally {
+    store.close();
+  }
+}
+
+async function restoreSnapshot(cwd: string, input: { snapshot_id: string }): Promise<Record<string, unknown>> {
+  const data = await buildIdentityAndProfile(cwd);
+  const { store } = await ensureStore(data.projectRoot);
+  try {
+    const snapshot = store.getSnapshotById(input.snapshot_id);
+    if (!snapshot) {
+      return { success: false, reason: "snapshot_not_found", snapshot_id: input.snapshot_id };
+    }
+    const safePath = resolveWorkspacePathSafely(cwd, snapshot.file_path);
+    if (!safePath.ok) {
+      return { success: false, reason: safePath.reason, snapshot_id: input.snapshot_id, file_path: snapshot.file_path };
+    }
+    const restored = decompressSnapshot(snapshot.compression, snapshot.content_blob);
+    await writeFile(safePath.fullPath, restored, "utf8");
+    return {
+      success: true,
+      snapshot_id: input.snapshot_id,
+      file_path: snapshot.file_path,
+      reason: "restored",
+    };
+  } finally {
+    store.close();
+  }
+}
+
+async function startTaskRun(
+  cwd: string,
+  input: { task_text: string; approval_budget?: Partial<TaskBudget> },
+): Promise<Record<string, unknown>> {
+  const data = await buildIdentityAndProfile(cwd);
+  const { store } = await ensureStore(data.projectRoot);
+  try {
+    const budget = defaultTaskBudget(input.approval_budget);
+    const created = store.startTaskRun(data.identity.project_id, input.task_text, budget, randomUUID());
+    return {
+      ok: true,
+      tool: "start_task_run",
+      task_run_id: created.id,
+      project_id: created.project_id,
+      budget: created.approval_budget,
+      status: created.status,
+    };
+  } finally {
+    store.close();
+  }
+}
+
+async function getTaskRun(cwd: string, input: { task_run_id: string }): Promise<Record<string, unknown>> {
+  const data = await buildIdentityAndProfile(cwd);
+  const { store } = await ensureStore(data.projectRoot);
+  try {
+    const row = store.getTaskRunById(input.task_run_id);
+    if (!row) return { ok: false, reason: "task_run_not_found", task_run_id: input.task_run_id };
+    if (row.project_id !== data.identity.project_id) {
+      return { ok: false, reason: "task_run_project_mismatch", task_run_id: input.task_run_id };
+    }
+    const usage = store.getTaskRunCommandUsage(input.task_run_id);
+    return {
+      ok: true,
+      tool: "get_task_run",
+      id: row.id,
+      project_id: row.project_id,
+      session_id: row.session_id,
+      task_text: row.task_text,
+      status: row.status,
+      approval_budget: row.approval_budget,
+      command_usage: usage,
+      started_at: row.started_at,
+      ended_at: row.ended_at,
+      summary: row.summary,
+    };
+  } finally {
+    store.close();
+  }
+}
+
+async function logAttempt(
+  cwd: string,
+  input: { task_run_id: string; kind: "patch" | "command" | "reasoning" | "memory"; summary: string; success: boolean; metadata?: Record<string, unknown> },
+): Promise<Record<string, unknown>> {
+  const data = await buildIdentityAndProfile(cwd);
+  const { store } = await ensureStore(data.projectRoot);
+  try {
+    const row = store.getTaskRunById(input.task_run_id);
+    if (!row) return { ok: false, reason: "task_run_not_found", task_run_id: input.task_run_id };
+    if (row.project_id !== data.identity.project_id) {
+      return { ok: false, reason: "task_run_project_mismatch", task_run_id: input.task_run_id };
+    }
+    const attemptId = store.insertTaskAttempt({
+      task_run_id: input.task_run_id,
+      project_id: data.identity.project_id,
+      kind: input.kind,
+      summary: input.summary,
+      success: input.success,
+      metadata: input.metadata ?? {},
+    });
+    return { ok: true, tool: "log_attempt", attempt_id: attemptId };
+  } finally {
+    store.close();
+  }
+}
+
+async function runProjectCommand(
+  cwd: string,
+  input: { task_run_id: string; kind: "test" | "lint" | "build" | "typecheck" },
+): Promise<Record<string, unknown>> {
+  const data = await buildIdentityAndProfile(cwd);
+  const { store } = await ensureStore(data.projectRoot);
+  try {
+    const taskRun = store.getTaskRunById(input.task_run_id);
+    if (!taskRun) return { ok: false, reason: "task_run_not_found", task_run_id: input.task_run_id };
+    if (taskRun.project_id !== data.identity.project_id) {
+      return { ok: false, reason: "task_run_project_mismatch", task_run_id: input.task_run_id };
+    }
+
+    const usage = store.getTaskRunCommandUsage(input.task_run_id);
+    const budget = taskRun.approval_budget;
+    const budgetLeft = remainingBudget(budget, usage);
+    const kindRemaining = Number(budgetLeft[input.kind] ?? 0);
+    if (budgetLeft.total <= 0 || kindRemaining <= 0) {
+      const attemptId = store.insertTaskAttempt({
+        task_run_id: input.task_run_id,
+        project_id: data.identity.project_id,
+        kind: "command",
+        summary: `blocked ${input.kind}: budget exceeded`,
+        success: false,
+        metadata: { command_kind: input.kind, reason: "budget_exceeded" },
+      });
+      return {
+        ok: false,
+        reason: "budget_exceeded",
+        attempt_id: attemptId,
+        budget_remaining: budgetLeft,
+      };
+    }
+
+    const commandStr = store.getProjectCommandString(data.identity.project_id, input.kind);
+    if (!commandStr) {
+      const attemptId = store.insertTaskAttempt({
+        task_run_id: input.task_run_id,
+        project_id: data.identity.project_id,
+        kind: "command",
+        summary: `missing ${input.kind} command`,
+        success: false,
+        metadata: { command_kind: input.kind, reason: "command_not_configured" },
+      });
+      return {
+        ok: false,
+        reason: "command_not_configured",
+        attempt_id: attemptId,
+        budget_remaining: remainingBudget(budget, store.getTaskRunCommandUsage(input.task_run_id)),
+      };
+    }
+
+    const parsedCommand = parseStructuredCommand(commandStr);
+    if (!parsedCommand.ok) {
+      const attemptId = store.insertTaskAttempt({
+        task_run_id: input.task_run_id,
+        project_id: data.identity.project_id,
+        kind: "command",
+        summary: `unsafe ${input.kind} command profile`,
+        success: false,
+        metadata: { command_kind: input.kind, reason: parsedCommand.reason, command: commandStr },
+      });
+      return {
+        ok: false,
+        reason: parsedCommand.reason,
+        attempt_id: attemptId,
+        budget_remaining: remainingBudget(budget, store.getTaskRunCommandUsage(input.task_run_id)),
+      };
+    }
+
+    const command = parsedCommand.value;
+    const runResult = await runStructuredCommand(command.cmd, command.args, data.projectRoot, budget.timeout_ms);
+    const success = runResult.exit_code === 0;
+    const combined = `${runResult.stdout}\n${runResult.stderr}`.trim();
+
+    let normalized: ReturnType<typeof normalizeTerminalError> | null = null;
+    if (!success) {
+      normalized = normalizeTerminalError(combined, {
+        command_kind: input.kind as CommandKind,
+        workspace: data.identity.workspace_relative_path,
+      });
+    }
+
+    const attemptId = store.insertTaskAttempt({
+      task_run_id: input.task_run_id,
+      project_id: data.identity.project_id,
+      kind: "command",
+      summary: `${input.kind} ${success ? "passed" : "failed"} (exit=${runResult.exit_code ?? "null"})`,
+      success,
+      metadata: {
+        command_kind: input.kind,
+        cmd: command.cmd,
+        args: command.args,
+        exit_code: runResult.exit_code,
+        signal: runResult.signal,
+        duration_ms: runResult.duration_ms,
+        normalized_error: normalized?.normalized_error ?? null,
+      },
+    });
+
+    return {
+      ok: true,
+      tool: "run_project_command",
+      success,
+      exit_code: runResult.exit_code,
+      signal: runResult.signal,
+      duration_ms: runResult.duration_ms,
+      stdout_tail: clampTail(runResult.stdout),
+      stderr_tail: clampTail(runResult.stderr),
+      combined_tail: clampTail(combined),
+      normalized_error: normalized?.normalized_error ?? null,
+      detected_toolchain: normalized?.detected_toolchain ?? null,
+      detected_language: normalized?.detected_language ?? null,
+      error_class: normalized?.error_class ?? null,
+      budget_remaining: remainingBudget(budget, store.getTaskRunCommandUsage(input.task_run_id)),
+      attempt_id: attemptId,
+      command: command,
+    };
+  } finally {
+    store.close();
+  }
+}
+
+async function createDebugSession(
+  cwd: string,
+  input: { task_text: string; initial_context?: string; approval_budget?: Partial<TaskBudget> },
+): Promise<Record<string, unknown>> {
+  const data = await buildIdentityAndProfile(cwd);
+  const { store } = await ensureStore(data.projectRoot);
+  try {
+    const budget = defaultTaskBudget(input.approval_budget);
+    const created = store.startTaskRun(data.identity.project_id, input.task_text, budget, randomUUID());
+    if (input.initial_context) {
+      store.insertTaskAttempt({
+        task_run_id: created.id,
+        project_id: data.identity.project_id,
+        kind: "reasoning",
+        summary: "initial debug context",
+        success: true,
+        metadata: { initial_context: input.initial_context },
+      });
+    }
+    return {
+      ok: true,
+      tool: "create_debug_session",
+      task_run_id: created.id,
+      project_id: created.project_id,
+      recommended_flow: workflowSteps(),
+      available_commands: ["test", "lint", "build", "typecheck"],
+      budget: created.approval_budget,
+    };
+  } finally {
+    store.close();
+  }
+}
+
+async function recordErrorObservation(
+  cwd: string,
+  input: { task_run_id: string; raw_output: string; command_kind?: "test" | "lint" | "build" | "typecheck" | "manual"; context?: Record<string, unknown> },
+): Promise<Record<string, unknown>> {
+  const data = await buildIdentityAndProfile(cwd);
+  const { store } = await ensureStore(data.projectRoot);
+  try {
+    const verified = verifyTaskRunForProject(store, input.task_run_id, data.identity.project_id);
+    if (!verified.ok) return verified.body;
+    const commandKind = input.command_kind === "manual" || !input.command_kind ? "unknown" : input.command_kind;
+    const normalized = normalizeTerminalError(input.raw_output, {
+      command_kind: commandKind as CommandKind,
+      workspace: data.identity.workspace_relative_path,
+    });
+    const attemptKind = input.command_kind && input.command_kind !== "manual" ? "command" : "reasoning";
+    store.insertTaskAttempt({
+      task_run_id: input.task_run_id,
+      project_id: data.identity.project_id,
+      kind: attemptKind,
+      summary: `observed ${normalized.error_class}`,
+      success: false,
+      metadata: {
+        command_kind: input.command_kind ?? "manual",
+        normalized,
+        context: input.context ?? {},
+      },
+    });
+    return {
+      ok: true,
+      tool: "record_error_observation",
+      normalized_error: normalized,
+      suggested_search_query: suggestedSearchQuery(normalized),
+      suggested_filters: {
+        language: normalized.detected_language !== "unknown" ? normalized.detected_language : undefined,
+        toolchain: normalized.detected_toolchain !== "unknown" ? normalized.detected_toolchain : undefined,
+        error_class: normalized.error_class !== "unknown_error" ? normalized.error_class : undefined,
+        workspace: data.identity.workspace_relative_path,
+      },
+      should_search_memory: normalized.confidence > 0.35,
+      confidence: normalized.confidence,
+    };
+  } finally {
+    store.close();
+  }
+}
+
+async function suggestNextActions(
+  cwd: string,
+  input: { task_run_id: string; normalized_error?: Record<string, unknown>; query?: string; limit: number },
+): Promise<Record<string, unknown>> {
+  const data = await buildIdentityAndProfile(cwd);
+  const { store } = await ensureStore(data.projectRoot);
+  try {
+    const verified = verifyTaskRunForProject(store, input.task_run_id, data.identity.project_id);
+    if (!verified.ok) return verified.body;
+    const attempts = store.getTaskAttempts(input.task_run_id);
+    const latestNormalized = attempts
+      .map((a) => a.metadata.normalized)
+      .find((n): n is Record<string, unknown> => !!n && typeof n === "object");
+    const normalized = input.normalized_error ?? latestNormalized ?? {};
+    const derivedQuery = [normalized.error_class, normalized.detected_toolchain, normalized.detected_language, normalized.normalized_error]
+      .filter(Boolean)
+      .join(" ")
+      .slice(0, 500);
+    const query = input.query ?? (derivedQuery || verified.taskRun.task_text);
+    const results = store.searchProjectExperience(data.identity.project_id, query, {}, input.limit);
+    return {
+      ok: true,
+      tool: "suggest_next_actions",
+      query,
+      relevant_memories: results,
+      suggested_actions: deterministicActions(normalized),
+      cautions: [
+        "Do not patch unless the target block is exact and unique.",
+        "Do not commit memory until the fix has been verified.",
+        "Stay within the task command budget.",
+      ],
+      recommended_command_to_run_next: commandRecommendation(normalized),
+    };
+  } finally {
+    store.close();
+  }
+}
+
+async function finalizeSuccessfulFix(
+  cwd: string,
+  input: {
+    task_run_id: string;
+    summary: string;
+    root_cause: string;
+    fix_pattern: string;
+    symptoms?: string[];
+    anti_patterns?: string[];
+    verification_steps?: string[];
+    files_changed?: string[];
+    error_class?: string;
+    language?: string;
+    toolchain?: string;
+    workspace?: string;
+    confidence: number;
+  },
+): Promise<Record<string, unknown>> {
+  const data = await buildIdentityAndProfile(cwd);
+  const { store } = await ensureStore(data.projectRoot);
+  try {
+    const verified = verifyTaskRunForProject(store, input.task_run_id, data.identity.project_id);
+    if (!verified.ok) return verified.body;
+    const metadata = {
+      root_cause: input.root_cause,
+      fix_pattern: input.fix_pattern,
+      symptoms: input.symptoms ?? [],
+      anti_patterns: input.anti_patterns ?? [],
+      verification_steps: input.verification_steps ?? [],
+      files: input.files_changed ?? [],
+      error_class: input.error_class,
+      language: input.language,
+      toolchain: input.toolchain,
+      workspace: input.workspace ?? data.identity.workspace_relative_path,
+      task_run_id: input.task_run_id,
+    };
+    const inserted = store.insertMemoryRecord(data.identity.project_id, {
+      type: "incident",
+      scope: "workspace-only",
+      content: input.summary,
+      confidence: input.confidence,
+      metadata,
+    });
+    store.updateTaskRunStatus(input.task_run_id, "succeeded", input.summary);
+    store.insertTaskAttempt({
+      task_run_id: input.task_run_id,
+      project_id: data.identity.project_id,
+      kind: "memory",
+      summary: "finalized successful fix",
+      success: true,
+      metadata: { memory_record_id: inserted.id, status: inserted.status },
+    });
+    return {
+      ok: true,
+      tool: "finalize_successful_fix",
+      memory_record_id: inserted.id,
+      task_run_id: input.task_run_id,
+      status: "succeeded",
+      vectorization_status: inserted.status,
+    };
+  } finally {
+    store.close();
+  }
+}
+
+async function failDebugSession(
+  cwd: string,
+  input: { task_run_id: string; reason: string; summary?: string },
+): Promise<Record<string, unknown>> {
+  const data = await buildIdentityAndProfile(cwd);
+  const { store } = await ensureStore(data.projectRoot);
+  try {
+    const verified = verifyTaskRunForProject(store, input.task_run_id, data.identity.project_id);
+    if (!verified.ok) return verified.body;
+    store.updateTaskRunStatus(input.task_run_id, "failed", input.summary ?? input.reason);
+    store.insertTaskAttempt({
+      task_run_id: input.task_run_id,
+      project_id: data.identity.project_id,
+      kind: "reasoning",
+      summary: input.summary ?? input.reason,
+      success: false,
+      metadata: { reason: input.reason },
+    });
+    return {
+      ok: true,
+      tool: "fail_debug_session",
+      task_run_id: input.task_run_id,
+      status: "failed",
+    };
+  } finally {
+    store.close();
+  }
+}
+
+export async function vectorizePendingMemories(
+  cwd: string,
+  input: { limit: number; retry_failed: boolean },
+): Promise<Record<string, unknown>> {
+  const data = await buildIdentityAndProfile(cwd);
+  const { store } = await ensureStore(data.projectRoot);
+  const config = getEmbeddingConfig();
+  const model = config.model;
+  const embeddingClient = getEmbeddingClient();
+  if (!config.embeddings_enabled) {
+    embeddingClient.setDisabledState();
+    store.close();
+    return {
+      ok: true,
+      tool: "vectorize_pending_memories",
+      model,
+      embeddings_enabled: false,
+      worker_state: embeddingClient.getState(),
+      vector_search_enabled: false,
+      processed_count: 0,
+      ready_count: 0,
+      failed_count: 0,
+      skipped_count: 0,
+      records: [],
+      message: "Embeddings disabled by BUGRECALL_EMBEDDINGS=off",
+    };
+  }
+
+  const effectiveLimit = Math.min(input.limit, config.max_batch);
+  let readyCount = 0;
+  let failedCount = 0;
+  let skippedCount = 0;
+  const records: Array<Record<string, unknown>> = [];
+  const t0 = Date.now();
+
+  try {
+    if (input.retry_failed) {
+      store.resetFailedVectorizationRecords(data.identity.project_id, effectiveLimit);
+    }
+    const queue = store.listPendingVectorizationRecordsForProject(
+      data.identity.project_id,
+      effectiveLimit,
+      input.retry_failed,
+    );
+
+    for (const record of queue) {
+      try {
+        console.error(`[embedder] vectorizing record ${record.id}`);
+        const cached = store.getEmbeddingCacheEntry(record.id);
+        if (cached && cached.model === model && cached.content_hash === record.content_hash) {
+          store.markVectorizationReady(record.id);
+          skippedCount += 1;
+          records.push({ id: record.id, status: "ready", skipped: true, reason: "cache-hit", dimension: cached.dimension });
+          console.error(`[embedder] record ready via cache ${record.id}`);
+          continue;
+        }
+
+        const recStart = Date.now();
+        const result = await embeddingClient.embed(record.id, record.embedding_text, model, config.timeout_ms);
+        const vector = new Float32Array(result.vector);
+        if (result.dimension !== 384) {
+          throw new Error(`Unexpected dimension ${result.dimension}; expected 384`);
+        }
+        store.upsertEmbeddingCache({
+          record_id: record.id,
+          project_id: data.identity.project_id,
+          model,
+          dimension: result.dimension,
+          vector,
+          content_hash: record.content_hash,
+        });
+        store.markVectorizationReady(record.id);
+        readyCount += 1;
+        records.push({
+          id: record.id,
+          status: "ready",
+          dimension: result.dimension,
+          duration_ms: Date.now() - recStart,
+        });
+        console.error(`[embedder] record ready ${record.id}`);
+      } catch (error: unknown) {
+        let message = error instanceof Error ? error.message : String(error);
+        if (message.includes("Protobuf parsing failed")) {
+          try {
+            const cachePath = path.join(
+              data.projectRoot,
+              "node_modules",
+              "@huggingface",
+              "transformers",
+              ".cache",
+              model,
+            );
+            await rm(cachePath, { recursive: true, force: true });
+            console.error(`[embedder] cache cleared after protobuf failure: ${cachePath}`);
+            const retry = await embeddingClient.embed(record.id, record.embedding_text, model, config.timeout_ms);
+            const retryVec = new Float32Array(retry.vector);
+            if (retry.dimension !== 384) throw new Error(`Unexpected dimension ${retry.dimension}; expected 384`);
+            store.upsertEmbeddingCache({
+              record_id: record.id,
+              project_id: data.identity.project_id,
+              model,
+              dimension: retry.dimension,
+              vector: retryVec,
+              content_hash: record.content_hash,
+            });
+            store.markVectorizationReady(record.id);
+            readyCount += 1;
+            records.push({ id: record.id, status: "ready", dimension: retry.dimension, retried: true });
+            console.error(`[embedder] record ready after retry ${record.id}`);
+            continue;
+          } catch (retryError: unknown) {
+            message = retryError instanceof Error ? retryError.message : String(retryError);
+          }
+        }
+        store.markVectorizationFailed(record.id, message);
+        failedCount += 1;
+        records.push({ id: record.id, status: "failed", error: message });
+        console.error(`[embedder] record failed ${record.id}: ${message}`);
+      }
+    }
+
+    return {
+      ok: true,
+      tool: "vectorize_pending_memories",
+      model,
+      embeddings_enabled: true,
+      worker_state: embeddingClient.getState(),
+      last_worker_error: embeddingClient.getLastError(),
+      vector_search_enabled: false,
+      processed_count: queue.length,
+      ready_count: readyCount,
+      failed_count: failedCount,
+      skipped_count: skippedCount,
+      total_duration_ms: Date.now() - t0,
+      records,
+    };
+  } finally {
+    store.close();
+  }
+}
+
+export async function getVectorizationStatus(
+  cwd: string,
+  _input: { limit?: number },
+): Promise<Record<string, unknown>> {
+  const data = await buildIdentityAndProfile(cwd);
+  const { store } = await ensureStore(data.projectRoot);
+  const config = getEmbeddingConfig();
+  const embeddingClient = getEmbeddingClient();
+  if (!config.embeddings_enabled) embeddingClient.setDisabledState();
+  try {
+    const status = store.getVectorizationStatus(data.identity.project_id);
+    const vectorStoreStatus = await getVectorStoreStatus();
+    return {
+      ok: true,
+      tool: "get_vectorization_status",
+      model: config.model,
+      embeddings_enabled: config.embeddings_enabled,
+      worker_state: embeddingClient.getState(),
+      last_worker_error: embeddingClient.getLastError(),
+      vector_search_enabled: vectorStoreStatus.state === "available",
+      vector_store_status: vectorStoreStatus,
+      indexed_count: store.countIndexedReadyRecords(data.identity.project_id),
+      ...status,
+    };
+  } finally {
+    store.close();
+  }
+}
+
+server.setRequestHandler(ListToolsRequestSchema, async () => ({
+  tools: [
+    {
+      name: "health_check",
+      description: "Returns basic service health status.",
+      inputSchema: { type: "object", properties: {}, additionalProperties: false },
+    },
+    {
+      name: "bootstrap_project",
+      description: "Bootstrap local project and persist project/profile rows in SQLite.",
+      inputSchema: { type: "object", properties: {}, additionalProperties: false },
+    },
+    {
+      name: "get_project_profile",
+      description: "Return detected project identity and profile metadata.",
+      inputSchema: { type: "object", properties: {}, additionalProperties: false },
+    },
+    {
+      name: "read_project_memory",
+      description: "Read latest high-confidence memory records for current project.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          type: { type: "string", enum: ["incident", "fact", "decision"] },
+          limit: { type: "number", minimum: 1, maximum: 100, default: 10 },
+        },
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "commit_postmortem",
+      description: "Store incident/fact/decision memory record for current project.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          type: { type: "string", enum: ["incident", "fact", "decision"], default: "incident" },
+          scope: { type: "string", enum: ["workspace-only", "project-only", "repo-family"], default: "workspace-only" },
+          content: { type: "string" },
+          confidence: { type: "number", minimum: 0, maximum: 1, default: 0.8 },
+          metadata: { type: "object", additionalProperties: true },
+        },
+        required: ["content"],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "ingest_terminal_error",
+      description: "Normalize terminal error logs into structured incident candidate without saving memory.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          raw_log: { type: "string" },
+          command_kind: { type: "string", enum: ["test", "lint", "build", "typecheck", "run", "unknown"] },
+          workspace: { type: "string" },
+          files: { type: "array", items: { type: "string" } },
+        },
+        required: ["raw_log"],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "search_project_experience",
+      description: "Search project memory records via text, vector, or hybrid retrieval with safe fallback.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          query: { type: "string" },
+          mode: { type: "string", enum: ["auto", "text", "vector", "hybrid"], default: "auto" },
+          filters: {
+            type: "object",
+            properties: {
+              type: { type: "string", enum: ["incident", "fact", "decision"] },
+              workspace: { type: "string" },
+              toolchain: { type: "string" },
+              language: { type: "string" },
+              error_class: { type: "string" },
+              min_confidence: { type: "number", minimum: 0, maximum: 1 },
+            },
+            additionalProperties: false,
+          },
+          limit: { type: "number", minimum: 1, maximum: 50, default: 5 },
+        },
+        required: ["query"],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "index_ready_memories",
+      description: "Index ready memory embeddings into optional LanceDB vector store.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          limit: { type: "number", minimum: 1, maximum: 500, default: 50 },
+          rebuild: { type: "boolean", default: false },
+        },
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "apply_search_replace_patch",
+      description: "Apply exact and unique search/replace patch with snapshot and patch history.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          file_path: { type: "string" },
+          search_block: { type: "string" },
+          replace_block: { type: "string" },
+          task_run_id: { type: "string" },
+        },
+        required: ["file_path", "search_block", "replace_block"],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "restore_snapshot",
+      description: "Restore file content from a stored snapshot.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          snapshot_id: { type: "string" },
+        },
+        required: ["snapshot_id"],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "start_task_run",
+      description: "Start a structured task run with command execution budget.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          task_text: { type: "string" },
+          approval_budget: {
+            type: "object",
+            properties: {
+              max_total_command_runs: { type: "number", minimum: 1, maximum: 100, default: 5 },
+              max_test_runs: { type: "number", minimum: 1, maximum: 100, default: 5 },
+              max_lint_runs: { type: "number", minimum: 1, maximum: 100, default: 3 },
+              max_build_runs: { type: "number", minimum: 1, maximum: 100, default: 3 },
+              max_typecheck_runs: { type: "number", minimum: 1, maximum: 100, default: 3 },
+              timeout_ms: { type: "number", minimum: 1000, maximum: 300000, default: 30000 },
+            },
+            additionalProperties: false,
+          },
+        },
+        required: ["task_text"],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "get_task_run",
+      description: "Read task run state and command usage.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          task_run_id: { type: "string" },
+        },
+        required: ["task_run_id"],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "run_project_command",
+      description: "Run configured project command (test/lint/build/typecheck) with budget checks.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          task_run_id: { type: "string" },
+          kind: { type: "string", enum: ["test", "lint", "build", "typecheck"] },
+        },
+        required: ["task_run_id", "kind"],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "log_attempt",
+      description: "Log a task attempt (patch/command/reasoning/memory).",
+      inputSchema: {
+        type: "object",
+        properties: {
+          task_run_id: { type: "string" },
+          kind: { type: "string", enum: ["patch", "command", "reasoning", "memory"] },
+          summary: { type: "string" },
+          success: { type: "boolean" },
+          metadata: { type: "object", additionalProperties: true },
+        },
+        required: ["task_run_id", "kind", "summary", "success"],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "create_debug_session",
+      description: "Create a controlled debug workflow session.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          task_text: { type: "string" },
+          initial_context: { type: "string" },
+          approval_budget: {
+            type: "object",
+            properties: {
+              max_total_command_runs: { type: "number", minimum: 1, maximum: 100, default: 5 },
+              max_test_runs: { type: "number", minimum: 1, maximum: 100, default: 5 },
+              max_lint_runs: { type: "number", minimum: 1, maximum: 100, default: 3 },
+              max_build_runs: { type: "number", minimum: 1, maximum: 100, default: 3 },
+              max_typecheck_runs: { type: "number", minimum: 1, maximum: 100, default: 3 },
+              timeout_ms: { type: "number", minimum: 1000, maximum: 300000, default: 30000 },
+            },
+            additionalProperties: false,
+          },
+        },
+        required: ["task_text"],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "record_error_observation",
+      description: "Normalize and log an observed terminal/debug error without writing memory.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          task_run_id: { type: "string" },
+          raw_output: { type: "string" },
+          command_kind: { type: "string", enum: ["test", "lint", "build", "typecheck", "manual"] },
+          context: { type: "object", additionalProperties: true },
+        },
+        required: ["task_run_id", "raw_output"],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "suggest_next_actions",
+      description: "Suggest deterministic next debug actions using current error and project memory.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          task_run_id: { type: "string" },
+          normalized_error: { type: "object", additionalProperties: true },
+          query: { type: "string" },
+          limit: { type: "number", minimum: 1, maximum: 20, default: 5 },
+        },
+        required: ["task_run_id"],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "finalize_successful_fix",
+      description: "Create a postmortem memory for a verified fix and mark debug session succeeded.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          task_run_id: { type: "string" },
+          summary: { type: "string" },
+          root_cause: { type: "string" },
+          fix_pattern: { type: "string" },
+          symptoms: { type: "array", items: { type: "string" } },
+          anti_patterns: { type: "array", items: { type: "string" } },
+          verification_steps: { type: "array", items: { type: "string" } },
+          files_changed: { type: "array", items: { type: "string" } },
+          error_class: { type: "string" },
+          language: { type: "string" },
+          toolchain: { type: "string" },
+          workspace: { type: "string" },
+          confidence: { type: "number", minimum: 0, maximum: 1, default: 0.9 },
+        },
+        required: ["task_run_id", "summary", "root_cause", "fix_pattern"],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "fail_debug_session",
+      description: "Mark a debug workflow session failed without writing memory.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          task_run_id: { type: "string" },
+          reason: { type: "string" },
+          summary: { type: "string" },
+        },
+        required: ["task_run_id", "reason"],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "vectorize_pending_memories",
+      description: "Process pending vectorization records and cache embeddings in SQLite.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          limit: { type: "number", minimum: 1, maximum: 50, default: 10 },
+          retry_failed: { type: "boolean", default: false },
+        },
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "get_vectorization_status",
+      description: "Return vectorization queue and embedding cache status.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          limit: { type: "number", minimum: 1, maximum: 1000 },
+        },
+        additionalProperties: false,
+      },
+    },
+  ],
+}));
+
+server.setRequestHandler(CallToolRequestSchema, async (request) => {
+  if (request.params.name === "health_check") {
+    return {
+      content: [{ type: "text", text: JSON.stringify({ status: "ok", service: "project-memory-agent" }) }],
+    };
+  }
+
+  if (request.params.name === "bootstrap_project") {
+    const result = await bootstrapProject(process.cwd());
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+
+  if (request.params.name === "get_project_profile") {
+    const result = await getProjectProfile(process.cwd());
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+
+  if (request.params.name === "read_project_memory") {
+    const parsed = readProjectMemoryInputSchema.parse(request.params.arguments ?? {});
+    const result = await readProjectMemory(process.cwd(), parsed);
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+
+  if (request.params.name === "commit_postmortem") {
+    const parsed = commitPostmortemInputSchema.parse(request.params.arguments ?? {});
+    const result = await commitPostmortem(process.cwd(), parsed);
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+
+  if (request.params.name === "ingest_terminal_error") {
+    const parsed = ingestTerminalErrorInputSchema.parse(request.params.arguments ?? {});
+    const result = await ingestTerminalError(process.cwd(), parsed);
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+
+  if (request.params.name === "search_project_experience") {
+    const parsed = searchProjectExperienceInputSchema.parse(request.params.arguments ?? {});
+    const result = await searchProjectExperience(process.cwd(), parsed);
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+
+  if (request.params.name === "index_ready_memories") {
+    const parsed = indexReadyMemoriesInputSchema.parse(request.params.arguments ?? {});
+    const result = await indexReadyMemories(process.cwd(), parsed);
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+
+  if (request.params.name === "apply_search_replace_patch") {
+    const parsed = applySearchReplacePatchInputSchema.parse(request.params.arguments ?? {});
+    const result = await applySearchReplacePatch(process.cwd(), parsed);
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+
+  if (request.params.name === "restore_snapshot") {
+    const parsed = restoreSnapshotInputSchema.parse(request.params.arguments ?? {});
+    const result = await restoreSnapshot(process.cwd(), parsed);
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+
+  if (request.params.name === "start_task_run") {
+    const parsed = startTaskRunInputSchema.parse(request.params.arguments ?? {});
+    const result = await startTaskRun(process.cwd(), parsed);
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+
+  if (request.params.name === "get_task_run") {
+    const parsed = getTaskRunInputSchema.parse(request.params.arguments ?? {});
+    const result = await getTaskRun(process.cwd(), parsed);
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+
+  if (request.params.name === "run_project_command") {
+    const parsed = runProjectCommandInputSchema.parse(request.params.arguments ?? {});
+    const result = await runProjectCommand(process.cwd(), parsed);
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+
+  if (request.params.name === "log_attempt") {
+    const parsed = logAttemptInputSchema.parse(request.params.arguments ?? {});
+    const result = await logAttempt(process.cwd(), parsed);
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+
+  if (request.params.name === "create_debug_session") {
+    const parsed = createDebugSessionInputSchema.parse(request.params.arguments ?? {});
+    const result = await createDebugSession(process.cwd(), parsed);
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+
+  if (request.params.name === "record_error_observation") {
+    const parsed = recordErrorObservationInputSchema.parse(request.params.arguments ?? {});
+    const result = await recordErrorObservation(process.cwd(), parsed);
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+
+  if (request.params.name === "suggest_next_actions") {
+    const parsed = suggestNextActionsInputSchema.parse(request.params.arguments ?? {});
+    const result = await suggestNextActions(process.cwd(), parsed);
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+
+  if (request.params.name === "finalize_successful_fix") {
+    const parsed = finalizeSuccessfulFixInputSchema.parse(request.params.arguments ?? {});
+    const result = await finalizeSuccessfulFix(process.cwd(), parsed);
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+
+  if (request.params.name === "fail_debug_session") {
+    const parsed = failDebugSessionInputSchema.parse(request.params.arguments ?? {});
+    const result = await failDebugSession(process.cwd(), parsed);
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+
+  if (request.params.name === "vectorize_pending_memories") {
+    const parsed = vectorizePendingMemoriesInputSchema.parse(request.params.arguments ?? {});
+    const result = await vectorizePendingMemories(process.cwd(), parsed);
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+
+  if (request.params.name === "get_vectorization_status") {
+    const parsed = getVectorizationStatusInputSchema.parse(request.params.arguments ?? {});
+    const result = await getVectorizationStatus(process.cwd(), parsed);
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+
+  throw new Error(`Unknown tool: ${request.params.name}`);
+});
+
+export async function startMcpServer(): Promise<void> {
+  const transport = new StdioServerTransport();
+  await server.connect(transport);
+  console.error("[pma] MCP server connected via stdio");
+}
