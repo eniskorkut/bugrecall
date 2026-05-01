@@ -1,0 +1,36 @@
+# Tool Workflows
+
+## 1. Bootstrap workflow
+
+1. `bootstrap_project`
+2. `get_project_profile`
+
+## 2. Terminal error workflow
+
+1. `ingest_terminal_error`
+2. `search_project_experience`
+3. `get_memory_detail` (optional deep read)
+
+## 3. Debug session workflow
+
+1. `create_debug_session`
+2. `record_error_observation`
+3. `suggest_next_actions`
+4. `run_project_command`
+5. `finalize_successful_fix`
+
+## 4. User rejected strategy workflow
+
+1. `record_user_correction`
+2. `search_project_experience` (warnings should surface)
+
+## 5. Recurring error workflow
+
+1. Repeat `ingest_terminal_error` for same normalized failure
+2. `get_recurring_errors`
+3. After successful fix, `finalize_successful_fix` links verified memory
+
+## 6. Patch safety workflow
+
+1. `apply_search_replace_patch`
+2. `restore_snapshot` (if rollback needed)
