@@ -92,6 +92,7 @@ Open:
 Notes:
 - Dashboard is local-only.
 - Opening `file://.../index.html` directly will not work for API calls.
+- Dashboard can now manage local memory: inspect recurring error detail, delete memory/user-correction records, export project JSON, and copy agent instructions.
 
 ## First project bootstrap
 

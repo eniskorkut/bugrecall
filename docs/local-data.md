@@ -30,6 +30,7 @@
 - Dashboard default host: `127.0.0.1`
 - Dashboard default port: `1453`
 - Remote bind blocked unless `BUGRECALL_DASHBOARD_ALLOW_REMOTE=1`
+- Dashboard export (`/api/export`) returns local JSON for current project/workspace.
 
 ## Command safety model
 
@@ -42,3 +43,9 @@
 - Search/replace patch requires exact unique match.
 - Snapshot captured before successful patch writes.
 - Restore is project/workspace-isolated.
+
+## Deletion behavior
+
+- Dashboard/API deletion removes matching `memory_records` rows in current project/workspace scope.
+- If a signature was linked to deleted memory, `error_signatures.linked_memory_id` is cleared.
+- Task/patch/snapshot history is not fully purged in this phase.

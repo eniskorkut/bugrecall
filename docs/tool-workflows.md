@@ -34,3 +34,9 @@
 
 1. `apply_search_replace_patch`
 2. `restore_snapshot` (if rollback needed)
+
+## 7. Optional dashboard management workflow
+
+1. Inspect memories / recurring errors / corrections
+2. Export project data as JSON
+3. Delete obsolete memory or correction records explicitly (with confirmation)

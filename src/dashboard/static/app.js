@@ -20,7 +20,11 @@ const ui = {
   taskData: document.getElementById("task-data"),
   taskAttempts: document.getElementById("task-attempts"),
   recurringErrorsData: document.getElementById("recurring-errors-data"),
+  recurringErrorDetail: document.getElementById("recurring-error-detail"),
   userCorrectionsData: document.getElementById("user-corrections-data"),
+  exportBtn: document.getElementById("export-btn"),
+  deleteMemoryBtn: document.getElementById("delete-memory-btn"),
+  agentInstructionsData: document.getElementById("agent-instructions-data"),
 };
 
 let selectedMemoryId = null;
@@ -145,6 +149,7 @@ function detailValue(val) {
 }
 
 async function loadMemories() {
+  ui.deleteMemoryBtn.disabled = !selectedMemoryId;
   const filters = new URLSearchParams();
   const map = {
     type: "flt-type",
@@ -163,6 +168,11 @@ async function loadMemories() {
   const rows = data.records || [];
   ui.memoryTableBody.innerHTML = "";
   ui.memoryEmpty.classList.toggle("hidden", rows.length > 0);
+  if (!rows.some((row) => row.id === selectedMemoryId)) {
+    selectedMemoryId = null;
+    ui.memoryDetail.textContent = "Click a row for details.";
+    ui.deleteMemoryBtn.disabled = true;
+  }
 
   rows.forEach((r) => {
     const tr = document.createElement("tr");
@@ -203,6 +213,7 @@ async function loadMemories() {
         null,
         2,
       ))}</pre>`;
+      ui.deleteMemoryBtn.disabled = false;
     };
     ui.memoryTableBody.appendChild(tr);
   });
@@ -295,16 +306,28 @@ function renderRecurringErrors(data) {
   const rows = data.recurring_errors || [];
   if (!rows.length) {
     ui.recurringErrorsData.innerHTML = `<div class="empty">No recurring errors yet. When the same normalized failure repeats, it will appear here.</div>`;
+    ui.recurringErrorDetail.textContent = "Select recurring error to see detail.";
     return;
   }
   ui.recurringErrorsData.innerHTML = `<div class="table-wrap"><table><thead><tr><th>class</th><th>message</th><th>lang/toolchain</th><th>count</th><th>last seen</th><th>fix</th></tr></thead><tbody>
     ${rows
       .map(
         (r) =>
-          `<tr><td>${escapeHtml(r.error_class || "-")}</td><td>${escapeHtml(r.normalized_message || "-")}</td><td>${escapeHtml(r.language || "-")} / ${escapeHtml(r.toolchain || "-")}</td><td>${r.occurrence_count || 0}</td><td>${fmtDate(r.last_seen_at)}</td><td>${r.has_verified_fix ? "verified" : "open"}</td></tr>`,
+          `<tr data-signature-id="${escapeHtml(r.id)}"><td>${escapeHtml(r.error_class || "-")}</td><td>${escapeHtml(r.normalized_message || "-")}</td><td>${escapeHtml(r.language || "-")} / ${escapeHtml(r.toolchain || "-")}</td><td>${r.occurrence_count || 0}</td><td>${fmtDate(r.last_seen_at)}</td><td>${r.has_verified_fix ? "verified" : "open"}</td></tr>`,
       )
       .join("")}
   </tbody></table></div>`;
+  Array.from(ui.recurringErrorsData.querySelectorAll("tr[data-signature-id]")).forEach((tr) => {
+    tr.onclick = async () => {
+      try {
+        const id = tr.dataset.signatureId;
+        const detail = await fetchApi(`/api/recurring-errors/${encodeURIComponent(id)}`);
+        ui.recurringErrorDetail.textContent = JSON.stringify(detail, null, 2);
+      } catch (e) {
+        setBanner("error", String(e));
+      }
+    };
+  });
 }
 
 function renderUserCorrections(data) {
@@ -313,7 +336,7 @@ function renderUserCorrections(data) {
     ui.userCorrectionsData.innerHTML = `<div class="empty">No user corrections yet. When you reject an agent's fix strategy, Bugrecall can remember it here.</div>`;
     return;
   }
-  ui.userCorrectionsData.innerHTML = `<div class="table-wrap"><table><thead><tr><th>type</th><th>future rule</th><th>rejected</th><th>preferred</th><th>applies_to</th><th>confidence</th><th>created</th></tr></thead><tbody>
+  ui.userCorrectionsData.innerHTML = `<div class="table-wrap"><table><thead><tr><th>type</th><th>future rule</th><th>rejected</th><th>preferred</th><th>applies_to</th><th>confidence</th><th>created</th><th>action</th></tr></thead><tbody>
     ${rows
       .map(
         (r) =>
@@ -325,10 +348,80 @@ function renderUserCorrections(data) {
             <td class="mono">${escapeHtml(JSON.stringify(r.applies_to || {}))}</td>
             <td>${Number(r.confidence || 0).toFixed(2)}</td>
             <td>${fmtDate(r.created_at)}</td>
+            <td><button class="btn secondary delete-correction-btn" data-id="${escapeHtml(r.id)}">Delete</button></td>
           </tr>`,
       )
       .join("")}
   </tbody></table></div>`;
+  Array.from(ui.userCorrectionsData.querySelectorAll(".delete-correction-btn")).forEach((btn) => {
+    btn.onclick = async () => {
+      const id = btn.dataset.id;
+      if (!window.confirm("Delete this user correction? Future searches will no longer warn about it.")) return;
+      const original = btn.textContent;
+      btn.disabled = true;
+      btn.textContent = "Deleting...";
+      try {
+        await fetchApi(`/api/user-corrections/${encodeURIComponent(id)}`, { method: "DELETE" });
+        await refreshReadOnlySections();
+        await runSearch().catch(() => {});
+        setBanner("success", "User correction deleted.");
+      } catch (e) {
+        setBanner("error", String(e));
+      } finally {
+        btn.disabled = false;
+        btn.textContent = original;
+      }
+    };
+  });
+}
+
+function downloadJson(filename, obj) {
+  const blob = new Blob([JSON.stringify(obj, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+async function loadAgentInstructions() {
+  const data = await fetchApi("/api/agent-instructions");
+  const templates = data.templates || {};
+  const rows = [
+    { key: "minimal", title: "Minimal", text: String(templates.minimal || "") },
+    { key: "full", title: "Full", text: String(templates.full || "") },
+    { key: "monorepo", title: "Monorepo", text: String(templates.monorepo || "") },
+  ];
+  ui.agentInstructionsData.innerHTML = rows
+    .map(
+      (row) => `<article class="result-card">
+      <div class="result-top">
+        <strong>${escapeHtml(row.title)}</strong>
+        <button class="btn secondary copy-instruction-btn" data-key="${escapeHtml(row.key)}">Copy</button>
+      </div>
+      <pre class="code small" id="instruction-${escapeHtml(row.key)}">${escapeHtml(row.text)}</pre>
+    </article>`,
+    )
+    .join("");
+  Array.from(ui.agentInstructionsData.querySelectorAll(".copy-instruction-btn")).forEach((btn) => {
+    btn.onclick = async () => {
+      const key = btn.dataset.key;
+      const text = String(templates[key] || "");
+      try {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          await navigator.clipboard.writeText(text);
+          setBanner("success", `Copied ${key} instruction.`);
+        } else {
+          setBanner("info", `Clipboard not available. Instruction shown in panel.`);
+        }
+      } catch {
+        setBanner("info", `Clipboard blocked. Instruction shown in panel.`);
+      }
+    };
+  });
 }
 
 async function refreshReadOnlySections() {
@@ -356,6 +449,7 @@ async function withAction(button, busyLabel, fn) {
 
 async function init() {
   wireTabs();
+  ui.deleteMemoryBtn.disabled = true;
   if (window.location.protocol === "file:") {
     setStatus(false, "error");
     setBanner("error", "Dashboard must run from local server. Run: node bin/pma.js dashboard then open http://127.0.0.1:1453");
@@ -403,12 +497,36 @@ async function init() {
       await loadOverview();
     });
   };
+  ui.exportBtn.onclick = async () => {
+    await withAction(ui.exportBtn, "Exporting...", async () => {
+      const out = await fetchApi("/api/export");
+      const day = new Date().toISOString().slice(0, 10);
+      downloadJson(`bugrecall-export-${day}.json`, out);
+      setBanner("success", "Export downloaded.");
+    });
+  };
+  ui.deleteMemoryBtn.onclick = async () => {
+    if (!selectedMemoryId) {
+      setBanner("info", "Select a memory first.");
+      return;
+    }
+    if (!window.confirm("Delete this memory from the current project? This cannot be undone.")) return;
+    await withAction(ui.deleteMemoryBtn, "Deleting...", async () => {
+      await fetchApi(`/api/memories/${encodeURIComponent(selectedMemoryId)}`, { method: "DELETE" });
+      selectedMemoryId = null;
+      ui.memoryDetail.textContent = "Click a row for details.";
+      await loadMemories();
+      await refreshReadOnlySections();
+      setBanner("success", "Memory deleted.");
+    });
+  };
 
   try {
     setStatus(false, "loading");
     await loadOverview();
     await loadMemories();
     await refreshReadOnlySections();
+    await loadAgentInstructions();
     setBanner("", "");
   } catch (e) {
     setStatus(false, "error");

@@ -36,7 +36,8 @@
     "eval:retrieval": "node dist/scripts/eval-retrieval.js",
     "doctor": "node dist/scripts/doctor.js",
     "phase13a:check": "node dist/scripts/phase13a-check.js",
-    "phase13b:check": "node dist/scripts/phase13b-check.js"
+    "phase13b:check": "node dist/scripts/phase13b-check.js",
+    "phase13c:check": "node dist/scripts/phase13c-check.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.0",

@@ -39,6 +39,7 @@
           <button class="tab" data-tab="vectorization"><span class="tab-mark">06</span><span>Vectorization</span></button>
           <button class="tab" data-tab="patch-history"><span class="tab-mark">07</span><span>Patch History</span></button>
           <button class="tab" data-tab="task-runs"><span class="tab-mark">08</span><span>Task Runs</span></button>
+          <button class="tab" data-tab="agent-instructions"><span class="tab-mark">09</span><span>Agent Instructions</span></button>
         </nav>
       </aside>
 
@@ -49,6 +50,7 @@
             <h2>Recall fixes, spot repeats, keep local context tidy.</h2>
           </div>
           <div class="hero-actions">
+            <button id="export-btn" class="btn secondary">Export JSON</button>
             <span class="soft-label">SQLite source of truth</span>
             <span class="soft-label">Workspace scoped</span>
           </div>
@@ -116,6 +118,9 @@
         </div>
         <div id="memory-empty" class="empty hidden">No memory records found.</div>
         <div class="detail-panel" id="memory-detail">Click a row for details.</div>
+        <div class="action-strip">
+          <button id="delete-memory-btn" class="btn secondary">Delete Selected Memory</button>
+        </div>
       </section>
 
       <section class="panel" id="panel-vectorization">
@@ -140,6 +145,7 @@
           </div>
         </div>
         <div id="recurring-errors-data"></div>
+        <pre class="code" id="recurring-error-detail">Select recurring error to see detail.</pre>
       </section>
 
       <section class="panel" id="panel-user-corrections">
@@ -171,6 +177,15 @@
         </div>
         <div id="task-data"></div>
         <pre class="code" id="task-attempts">Select task run to see attempts.</pre>
+      </section>
+      <section class="panel" id="panel-agent-instructions">
+        <div class="section-head">
+          <div>
+            <h2>Agent Instructions</h2>
+            <p class="muted">Copy safe Bugrecall instructions into your coding agent.</p>
+          </div>
+        </div>
+        <div id="agent-instructions-data"></div>
       </section>
       </main>
     </div>

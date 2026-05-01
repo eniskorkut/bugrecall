@@ -1,5 +1,7 @@
 import { getEmbeddingClient } from "../engine/embedding/embeddingClient.js";
 import { getVectorStoreStatus } from "../db/vector/lanceStore.js";
+import { readFile } from "node:fs/promises";
+import path from "node:path";
 import {
   buildIdentityAndProfile,
   ensureStore,
@@ -27,6 +29,30 @@ function parseLimit(value: string | null, fallback: number, min: number, max: nu
 function parseMode(value: string | null): "auto" | "text" | "vector" | "hybrid" {
   if (value === "text" || value === "vector" || value === "hybrid") return value;
   return "auto";
+}
+
+async function loadAgentInstructionTemplates(cwd: string): Promise<{ minimal: string; full: string; monorepo: string }> {
+  const readOrFallback = async (filePath: string, fallback: string): Promise<string> => {
+    try {
+      return await readFile(filePath, "utf8");
+    } catch {
+      return fallback;
+    }
+  };
+
+  const minimal = await readOrFallback(
+    path.join(cwd, "examples", "agent-instruction-minimal.md"),
+    "Use Bugrecall for this project. Bootstrap first, search memory before patching, finalize only after verification.",
+  );
+  const full = await readOrFallback(
+    path.join(cwd, "examples", "agent-instruction-full.md"),
+    "Use Bugrecall as debug memory: bootstrap, ingest/observe errors, search before patching, finalize after verification.",
+  );
+  const monorepo = await readOrFallback(
+    path.join(cwd, "examples", "agent-instruction-monorepo.md"),
+    "Use workspace_path consistently for monorepo tasks.",
+  );
+  return { minimal, full, monorepo };
 }
 
 export async function handleApiRequest(cwd: string, method: string, pathname: string, url: URL, bodyRaw: string): Promise<ApiResult> {
@@ -123,6 +149,13 @@ export async function handleApiRequest(cwd: string, method: string, pathname: st
       };
     }
 
+    if (pathname.startsWith("/api/memories/") && method === "DELETE") {
+      const id = decodeURIComponent(pathname.replace("/api/memories/", ""));
+      const deleted = store.deleteMemoryRecord(data.identity.project_id, id);
+      if (!deleted.deleted) return { status: 404, body: { ok: false, reason: deleted.reason ?? "not_found" } };
+      return { status: 200, body: { ok: true, deleted: true, memory_id: id } };
+    }
+
     if (pathname === "/api/search" && method === "GET") {
       const q = url.searchParams.get("q") ?? "";
       if (!q.trim()) return { status: 400, body: { ok: false, reason: "missing_query" } };
@@ -159,6 +192,31 @@ export async function handleApiRequest(cwd: string, method: string, pathname: st
       return { status: 200, body: result };
     }
 
+    if (pathname.startsWith("/api/recurring-errors/") && method === "GET") {
+      const id = decodeURIComponent(pathname.replace("/api/recurring-errors/", ""));
+      const signature = store.getErrorSignatureDetail(data.identity.project_id, id);
+      if (!signature) return { status: 404, body: { ok: false, reason: "not_found" } };
+      const occurrences = store.listErrorOccurrences(data.identity.project_id, id, parseLimit(url.searchParams.get("limit"), 20, 1, 200));
+      const linkedMemory = signature.linked_memory_id ? store.getMemoryRecordById(data.identity.project_id, signature.linked_memory_id) : null;
+      return {
+        status: 200,
+        body: {
+          ok: true,
+          signature,
+          linked_memory: linkedMemory
+            ? { id: linkedMemory.id, type: linkedMemory.type, summary: linkedMemory.summary, status: linkedMemory.status }
+            : null,
+          occurrences: occurrences.map((row) => ({
+            id: row.id,
+            task_run_id: row.task_run_id,
+            command_kind: row.command_kind,
+            normalized_error: row.normalized_error_json,
+            created_at: row.created_at,
+          })),
+        },
+      };
+    }
+
     if (pathname === "/api/user-corrections" && method === "GET") {
       const result = await listUserCorrections(cwd, {
         workspace_path: workspacePath,
@@ -170,6 +228,94 @@ export async function handleApiRequest(cwd: string, method: string, pathname: st
         error_class: url.searchParams.get("error_class") ?? undefined,
       });
       return { status: 200, body: result };
+    }
+
+    if (pathname.startsWith("/api/user-corrections/") && method === "DELETE") {
+      const id = decodeURIComponent(pathname.replace("/api/user-corrections/", ""));
+      const record = store.getMemoryRecordById(data.identity.project_id, id);
+      if (!record) return { status: 404, body: { ok: false, reason: "not_found" } };
+      if (record.type !== "rejected_fix" && record.type !== "project_preference") {
+        return { status: 400, body: { ok: false, reason: "not_user_correction" } };
+      }
+      const deleted = store.deleteMemoryRecord(data.identity.project_id, id);
+      if (!deleted.deleted) return { status: 404, body: { ok: false, reason: deleted.reason ?? "not_found" } };
+      return { status: 200, body: { ok: true, deleted: true, memory_id: id } };
+    }
+
+    if (pathname === "/api/export" && method === "GET") {
+      const memoryRows = store.listMemoryRecords(data.identity.project_id, {}, 500);
+      const recurring = store.listRecurringErrors(data.identity.project_id, { limit: 200, min_occurrences: 1 });
+      const corrections = store.listUserCorrections(data.identity.project_id, {}, 200);
+      const tasks = store.listTaskRuns(data.identity.project_id, 200);
+      const patches = store.listPatchHistory(data.identity.project_id, 200);
+      return {
+        status: 200,
+        body: {
+          ok: true,
+          version: "bugrecall-export-v1",
+          exported_at: new Date().toISOString(),
+          project: {
+            identity: data.identity,
+            profile: data.profile,
+          },
+          memories: memoryRows.map((m) => ({
+            id: m.id,
+            type: m.type,
+            scope: m.scope,
+            summary: m.summary,
+            content: m.content,
+            metadata: m.metadata,
+            status: m.status,
+            confidence: m.confidence,
+            created_at: m.created_at,
+            updated_at: m.updated_at,
+            retrieval_hits: m.retrieval_hits,
+            last_retrieved_at: m.last_retrieved_at,
+          })),
+          recurring_errors: recurring.map((r) => ({
+            id: r.id,
+            signature_hash: r.signature_hash,
+            error_class: r.error_class,
+            language: r.language,
+            toolchain: r.toolchain,
+            normalized_message: r.normalized_message,
+            occurrence_count: r.occurrence_count,
+            first_seen_at: r.first_seen_at,
+            last_seen_at: r.last_seen_at,
+            linked_memory_id: r.linked_memory_id,
+          })),
+          user_corrections: corrections.map((c) => ({
+            id: c.id,
+            type: c.type,
+            summary: c.summary,
+            content: c.content,
+            metadata: c.metadata,
+            confidence: c.confidence,
+            created_at: c.created_at,
+          })),
+          task_runs_summary: tasks.map((t) => ({
+            id: t.id,
+            task_text: t.task_text,
+            status: t.status,
+            started_at: t.started_at,
+            ended_at: t.ended_at,
+            summary: t.summary,
+          })),
+          patch_history_summary: patches.map((p) => ({
+            id: p.id,
+            task_run_id: p.task_run_id,
+            file_path: p.file_path,
+            success_flag: p.success_flag,
+            reason: p.reason,
+            created_at: p.created_at,
+          })),
+        },
+      };
+    }
+
+    if (pathname === "/api/agent-instructions" && method === "GET") {
+      const templates = await loadAgentInstructionTemplates(cwd);
+      return { status: 200, body: { ok: true, templates } };
     }
 
     if (pathname === "/api/vectorization/run" && method === "POST") {

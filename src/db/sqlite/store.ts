@@ -206,6 +206,17 @@ export type ErrorSignatureRow = {
   updated_at: string;
 };
 
+export type ErrorOccurrenceRow = {
+  id: string;
+  signature_id: string;
+  project_id: string;
+  task_run_id: string | null;
+  command_kind: string | null;
+  normalized_error_json: Record<string, unknown>;
+  raw_log_hash: string | null;
+  created_at: string;
+};
+
 export class SqliteStore {
   private readonly db: Database.Database;
 
@@ -1068,6 +1079,24 @@ export class SqliteStore {
     };
   }
 
+  deleteMemoryRecord(projectId: string, id: string): { deleted: boolean; reason?: "not_found" } {
+    const tx = this.db.transaction((project: string, memoryId: string) => {
+      const existing = this.db
+        .prepare("SELECT id FROM memory_records WHERE project_id = ? AND id = ?")
+        .get(project, memoryId) as { id: string } | undefined;
+      if (!existing) return { deleted: false as const, reason: "not_found" as const };
+
+      this.db.prepare("DELETE FROM memory_records WHERE project_id = ? AND id = ?").run(project, memoryId);
+      this.db
+        .prepare("UPDATE error_signatures SET linked_memory_id = NULL, updated_at = ? WHERE project_id = ? AND linked_memory_id = ?")
+        .run(new Date().toISOString(), project, memoryId);
+
+      return { deleted: true as const };
+    });
+
+    return tx(projectId, id);
+  }
+
   getMemoryRecordByIdAnyProject(id: string): MemoryRecord | null {
     const row = this.db
       .prepare(
@@ -1370,6 +1399,37 @@ export class SqliteStore {
       )
       .get(id) as Record<string, unknown> | undefined;
     return row ? this.mapErrorSignatureRow(row) : null;
+  }
+
+  getErrorSignatureDetail(projectId: string, signatureId: string): ErrorSignatureRow | null {
+    const row = this.getErrorSignatureById(signatureId);
+    if (!row || row.project_id !== projectId) return null;
+    return row;
+  }
+
+  listErrorOccurrences(projectId: string, signatureId: string, limit: number): ErrorOccurrenceRow[] {
+    const limitSafe = Math.max(1, Math.min(200, limit));
+    const rows = this.db
+      .prepare(
+        `
+      SELECT id, signature_id, project_id, task_run_id, command_kind, normalized_error_json, raw_log_hash, created_at
+      FROM error_occurrences
+      WHERE project_id = ? AND signature_id = ?
+      ORDER BY datetime(created_at) DESC
+      LIMIT ?
+    `,
+      )
+      .all(projectId, signatureId, limitSafe) as Array<Record<string, unknown>>;
+    return rows.map((row) => ({
+      id: String(row.id),
+      signature_id: String(row.signature_id),
+      project_id: String(row.project_id),
+      task_run_id: row.task_run_id ? String(row.task_run_id) : null,
+      command_kind: row.command_kind ? String(row.command_kind) : null,
+      normalized_error_json: safeJsonParse<Record<string, unknown>>(String(row.normalized_error_json ?? "{}"), {}),
+      raw_log_hash: row.raw_log_hash ? String(row.raw_log_hash) : null,
+      created_at: String(row.created_at),
+    }));
   }
 
   getErrorSignatureByHash(projectId: string, signatureHash: string): ErrorSignatureRow | null {
