@@ -18,8 +18,10 @@ function runGit(args: string[], cwd: string): void {
 async function createFixture(baseDir: string): Promise<string> {
   const repoDir = path.join(baseDir, "repo");
   await mkdir(path.join(repoDir, "apps", "web"), { recursive: true });
+  await mkdir(path.join(repoDir, "examples"), { recursive: true });
   await writeFile(path.join(repoDir, "package.json"), JSON.stringify({ private: true, scripts: { test: "node test.js" } }, null, 2), "utf8");
   await writeFile(path.join(repoDir, "test.js"), "console.log('ok')\n", "utf8");
+  await writeFile(path.join(repoDir, "examples", "agent-instruction-full.md"), "TARGET_FAKE_TEMPLATE_SHOULD_NOT_BE_USED", "utf8");
   runGit(["init"], repoDir);
   runGit(["config", "user.email", "phase13c@example.com"], repoDir);
   runGit(["config", "user.name", "phase13c"], repoDir);
@@ -121,6 +123,14 @@ async function main(): Promise<void> {
       assert(instructions.ok === true, "agent instructions should succeed");
       const templates = instructions.templates as Record<string, unknown>;
       assert(Boolean(templates.minimal) && Boolean(templates.full) && Boolean(templates.monorepo), "missing instruction templates");
+      const full = String(templates.full ?? "");
+      const minimal = String(templates.minimal ?? "");
+      const monorepo = String(templates.monorepo ?? "");
+      assert(!full.includes("TARGET_FAKE_TEMPLATE_SHOULD_NOT_BE_USED"), "agent instructions incorrectly loaded target project examples");
+      assert(full.includes("bootstrap_project"), "full instruction should include bootstrap_project");
+      assert(full.includes("search_project_experience"), "full instruction should include search_project_experience");
+      assert(monorepo.includes("workspace_path"), "monorepo instruction should include workspace_path");
+      assert(minimal.length > 20, "minimal instruction should be non-trivial");
     } finally {
       store.close();
     }

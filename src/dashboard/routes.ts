@@ -2,6 +2,7 @@ import { getEmbeddingClient } from "../engine/embedding/embeddingClient.js";
 import { getVectorStoreStatus } from "../db/vector/lanceStore.js";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   buildIdentityAndProfile,
   ensureStore,
@@ -53,6 +54,12 @@ async function loadAgentInstructionTemplates(cwd: string): Promise<{ minimal: st
     "Use workspace_path consistently for monorepo tasks.",
   );
   return { minimal, full, monorepo };
+}
+
+function resolveBugrecallPackageRoot(): string {
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const candidate = path.resolve(here, "../..");
+  return candidate;
 }
 
 export async function handleApiRequest(cwd: string, method: string, pathname: string, url: URL, bodyRaw: string): Promise<ApiResult> {
@@ -314,7 +321,8 @@ export async function handleApiRequest(cwd: string, method: string, pathname: st
     }
 
     if (pathname === "/api/agent-instructions" && method === "GET") {
-      const templates = await loadAgentInstructionTemplates(cwd);
+      const packageRoot = resolveBugrecallPackageRoot();
+      const templates = await loadAgentInstructionTemplates(packageRoot);
       return { status: 200, body: { ok: true, templates } };
     }
 
