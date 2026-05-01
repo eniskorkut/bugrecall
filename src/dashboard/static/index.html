@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Bugrecall Dashboard</title>
-    <link rel="stylesheet" href="/styles.css" />
+    <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
     <header class="topbar">
@@ -12,7 +12,7 @@
         <div class="logo">br</div>
         <div>
           <h1>Bugrecall</h1>
-          <p class="muted">Project Memory Console</p>
+          <p class="muted">Local project memory</p>
         </div>
       </div>
       <div class="status-wrap">
@@ -25,25 +25,40 @@
 
     <div class="app-shell">
       <aside class="sidebar">
+        <div class="side-card">
+          <span class="side-kicker">Workspace</span>
+          <strong id="workspace-label">Loading</strong>
+          <span id="project-line" class="side-meta">Loading project...</span>
+        </div>
         <nav class="tabs">
-          <button class="tab active" data-tab="overview"><span>Overview</span></button>
-          <button class="tab" data-tab="search"><span>Search</span></button>
-          <button class="tab" data-tab="memories"><span>Memories</span></button>
-          <button class="tab" data-tab="recurring-errors"><span>Recurring Errors</span></button>
-          <button class="tab" data-tab="vectorization"><span>Vectorization</span></button>
-          <button class="tab" data-tab="patch-history"><span>Patch History</span></button>
-          <button class="tab" data-tab="task-runs"><span>Task Runs</span></button>
+          <button class="tab active" data-tab="overview"><span class="tab-mark">01</span><span>Overview</span></button>
+          <button class="tab" data-tab="search"><span class="tab-mark">02</span><span>Search</span></button>
+          <button class="tab" data-tab="memories"><span class="tab-mark">03</span><span>Memories</span></button>
+          <button class="tab" data-tab="recurring-errors"><span class="tab-mark">04</span><span>Recurring Errors</span></button>
+          <button class="tab" data-tab="vectorization"><span class="tab-mark">05</span><span>Vectorization</span></button>
+          <button class="tab" data-tab="patch-history"><span class="tab-mark">06</span><span>Patch History</span></button>
+          <button class="tab" data-tab="task-runs"><span class="tab-mark">07</span><span>Task Runs</span></button>
         </nav>
       </aside>
 
       <main class="layout">
+        <section class="workspace-hero">
+          <div>
+            <span class="eyebrow">Bugrecall console</span>
+            <h2>Recall fixes, spot repeats, keep local context tidy.</h2>
+          </div>
+          <div class="hero-actions">
+            <span class="soft-label">SQLite source of truth</span>
+            <span class="soft-label">Workspace scoped</span>
+          </div>
+        </section>
+
         <section class="panel active" id="panel-overview">
           <div class="section-head">
             <div>
               <h2>Overview</h2>
-              <p id="project-line" class="muted">Loading project...</p>
+              <p class="muted">Project health, memory state, and local retrieval readiness.</p>
             </div>
-            <span class="soft-label" id="workspace-label">Workspace</span>
           </div>
           <div id="overview-cards" class="cards"></div>
           <details class="details-box">
@@ -109,7 +124,7 @@
             <p class="muted">Embedding cache and optional vector index maintenance.</p>
           </div>
         </div>
-        <div class="row">
+        <div class="action-strip">
           <button id="vectorize-btn" class="btn primary">Vectorize Pending</button>
           <button id="index-btn" class="btn secondary">Index Ready Memories</button>
         </div>
@@ -148,6 +163,6 @@
       </section>
       </main>
     </div>
-    <script src="/app.js"></script>
+    <script src="app.js"></script>
   </body>
 </html>

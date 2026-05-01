@@ -97,16 +97,16 @@ function wireTabs() {
 function renderOverviewCards(overview) {
   const counts = overview.memory_counts || {};
   const cards = [
-    ["Project", shortId(overview.project_id), "neutral"],
-    ["Total Memories", Number(counts.pending_vectorization || 0) + Number(counts.ready || 0) + Number(counts.failed || 0) + Number(counts.pending_retry || 0), "neutral"],
-    ["Pending Vectorization", counts.pending_vectorization || 0, "warn"],
+    ["Project ID", shortId(overview.project_id), "neutral"],
+    ["Memories", Number(counts.pending_vectorization || 0) + Number(counts.ready || 0) + Number(counts.failed || 0) + Number(counts.pending_retry || 0), "neutral"],
+    ["Pending", counts.pending_vectorization || 0, "warn"],
     ["Ready", counts.ready || 0, "ok"],
     ["Failed", counts.failed || 0, "err"],
     ["Embedded", overview.embedded_count || 0, "accent"],
-    ["Vector Search", overview.vector_search_enabled ? "enabled" : "disabled", overview.vector_search_enabled ? "ok" : "neutral"],
+    ["Vector Search", overview.vector_search_enabled ? "On" : "Off", overview.vector_search_enabled ? "ok" : "neutral"],
     ["Worker", overview.worker_state || "-", "neutral"],
     ["Task Runs", overview.task_run_count || 0, "accent"],
-    ["Patch Count", overview.patch_count || 0, "neutral"],
+    ["Patches", overview.patch_count || 0, "neutral"],
   ];
   ui.overviewCards.innerHTML = cards
     .map(([k, v, tone]) => `<article class="mini-card ${tone}"><h3>${k}</h3><p>${String(v)}</p></article>`)
@@ -120,7 +120,7 @@ async function loadOverview() {
     fetchApi("/api/overview"),
     fetchApi("/api/vectorization/status"),
   ]);
-  ui.projectLine.textContent = `Workspace ${project.identity.workspace_relative_path}  ·  ${shortId(project.identity.project_id)}`;
+  ui.projectLine.textContent = `${project.identity.workspace_relative_path} · ${shortId(project.identity.project_id)}`;
   document.getElementById("workspace-label").textContent = project.profile.package_manager || "workspace";
   renderOverviewCards(overview);
   ui.overviewData.textContent = JSON.stringify(overview, null, 2);
@@ -172,22 +172,26 @@ async function loadMemories() {
       await loadMemories();
       const detail = await fetchApi(`/api/memories/${encodeURIComponent(r.id)}`);
       const m = detail.record || {};
-      ui.memoryDetail.textContent = [
-        `id: ${m.id || "-"}`,
-        `type: ${m.type || "-"}`,
-        `status: ${m.status || "-"}`,
-        `content: ${detailValue(m.content)}`,
-        `symptoms: ${detailValue(m.symptoms)}`,
-        `root_cause: ${detailValue(m.root_cause)}`,
-        `fix_pattern: ${detailValue(m.fix_pattern)}`,
-        `anti_patterns: ${detailValue(m.anti_patterns)}`,
-        `verification_steps: ${detailValue(m.verification_steps)}`,
-        `retrieval_hits: ${detailValue(m.retrieval_hits)}`,
-        `last_retrieved_at: ${detailValue(fmtDate(m.last_retrieved_at))}`,
-        "",
-        "metadata:",
-        JSON.stringify(m.metadata || {}, null, 2),
-      ].join("\n");
+      ui.memoryDetail.innerHTML = `<div class="result-top">
+        <span class="mono">${m.id || "-"}</span>
+        ${statusBadge(m.status)}
+        <span>${m.type || "-"}</span>
+      </div>
+      <p>${detailValue(m.content)}</p>
+      <pre class="code small">${JSON.stringify(
+        {
+          symptoms: m.symptoms || "-",
+          root_cause: m.root_cause || "-",
+          fix_pattern: m.fix_pattern || "-",
+          anti_patterns: m.anti_patterns || "-",
+          verification_steps: m.verification_steps || "-",
+          retrieval_hits: m.retrieval_hits || 0,
+          last_retrieved_at: fmtDate(m.last_retrieved_at),
+          metadata: m.metadata || {},
+        },
+        null,
+        2,
+      )}</pre>`;
     };
     ui.memoryTableBody.appendChild(tr);
   });
@@ -261,14 +265,14 @@ function renderTaskRuns(data) {
 function renderRecurringErrors(data) {
   const rows = data.recurring_errors || [];
   if (!rows.length) {
-    ui.recurringErrorsData.innerHTML = `<div class="empty">No recurring errors yet.</div>`;
+    ui.recurringErrorsData.innerHTML = `<div class="empty">No recurring errors yet. When the same normalized failure repeats, it will appear here.</div>`;
     return;
   }
   ui.recurringErrorsData.innerHTML = `<div class="table-wrap"><table><thead><tr><th>class</th><th>message</th><th>lang/toolchain</th><th>count</th><th>last seen</th><th>fix</th></tr></thead><tbody>
     ${rows
       .map(
         (r) =>
-          `<tr><td>${r.error_class || "-"}</td><td>${r.normalized_message || "-"}</td><td>${r.language || "-"} / ${r.toolchain || "-"}</td><td>${r.occurrence_count || 0}</td><td>${fmtDate(r.last_seen_at)}</td><td>${r.has_verified_fix ? "yes" : "no"}</td></tr>`,
+          `<tr><td>${r.error_class || "-"}</td><td>${r.normalized_message || "-"}</td><td>${r.language || "-"} / ${r.toolchain || "-"}</td><td>${r.occurrence_count || 0}</td><td>${fmtDate(r.last_seen_at)}</td><td>${r.has_verified_fix ? "verified" : "open"}</td></tr>`,
       )
       .join("")}
   </tbody></table></div>`;
