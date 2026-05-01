@@ -1,6 +1,6 @@
 import { getEmbeddingClient } from "../engine/embedding/embeddingClient.js";
 import { getVectorStoreStatus } from "../db/vector/lanceStore.js";
-import { buildIdentityAndProfile, ensureStore, getRecurringErrors, getVectorizationStatus, indexReadyMemories, searchProjectExperience, vectorizePendingMemories } from "../index.js";
+import { buildIdentityAndProfile, ensureStore, getRecurringErrors, getVectorizationStatus, indexReadyMemories, listUserCorrections, searchProjectExperience, vectorizePendingMemories } from "../index.js";
 
 type ApiResult = {
   status: number;
@@ -131,6 +131,19 @@ export async function handleApiRequest(cwd: string, method: string, pathname: st
         limit: parseLimit(url.searchParams.get("limit"), 20, 1, 200),
         min_occurrences: parseLimit(url.searchParams.get("min_occurrences"), 2, 1, 1000),
         language: url.searchParams.get("language") ?? undefined,
+        toolchain: url.searchParams.get("toolchain") ?? undefined,
+        error_class: url.searchParams.get("error_class") ?? undefined,
+      });
+      return { status: 200, body: result };
+    }
+
+    if (pathname === "/api/user-corrections" && method === "GET") {
+      const result = await listUserCorrections(cwd, {
+        workspace_path: workspacePath,
+        limit: parseLimit(url.searchParams.get("limit"), 50, 1, 500),
+        correction_type: (url.searchParams.get("correction_type") as "rejected_fix" | "project_preference" | null) ?? undefined,
+        language: url.searchParams.get("language") ?? undefined,
+        framework: url.searchParams.get("framework") ?? undefined,
         toolchain: url.searchParams.get("toolchain") ?? undefined,
         error_class: url.searchParams.get("error_class") ?? undefined,
       });

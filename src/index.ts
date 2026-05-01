@@ -41,6 +41,8 @@ const server = new Server(
 type ProjectProfile = ProjectProfileRow;
 
 type ProjectIdentity = ProjectIdentityRow;
+const memoryTypeValues = ["incident", "fact", "decision", "rejected_fix", "project_preference"] as const;
+type MemoryType = (typeof memoryTypeValues)[number];
 
 const workspacePathField = {
   workspace_path: z.string().optional(),
@@ -52,7 +54,7 @@ const getProjectProfileInputSchema = z.object(workspacePathField).strict();
 const readProjectMemoryInputSchema = z
   .object({
     ...workspacePathField,
-    type: z.enum(["incident", "fact", "decision"]).optional(),
+    type: z.enum(memoryTypeValues).optional(),
     limit: z.number().int().min(1).max(100).optional().default(10),
   })
   .strict();
@@ -60,7 +62,7 @@ const readProjectMemoryInputSchema = z
 const commitPostmortemInputSchema = z
   .object({
     ...workspacePathField,
-    type: z.enum(["incident", "fact", "decision"]).default("incident"),
+    type: z.enum(memoryTypeValues).default("incident"),
     scope: z.enum(["workspace-only", "project-only", "repo-family"]).default("workspace-only"),
     content: z.string().min(1),
     confidence: z.number().min(0).max(1).default(0.8),
@@ -84,7 +86,7 @@ const searchProjectExperienceInputSchema = z
     query: z.string().min(1),
     filters: z
       .object({
-        type: z.enum(["incident", "fact", "decision"]).optional(),
+        type: z.enum(memoryTypeValues).optional(),
         workspace: z.string().optional(),
         toolchain: z.string().optional(),
         language: z.string().optional(),
@@ -94,6 +96,42 @@ const searchProjectExperienceInputSchema = z
       .optional(),
     limit: z.number().int().min(1).max(50).optional().default(5),
     mode: z.enum(["auto", "text", "vector", "hybrid"]).optional().default("auto"),
+  })
+  .strict();
+
+const recordUserCorrectionInputSchema = z
+  .object({
+    ...workspacePathField,
+    correction_type: z.enum(["rejected_fix", "project_preference"]).optional().default("project_preference"),
+    context: z.string().min(1),
+    user_feedback: z.string().min(1),
+    rejected_pattern: z.string().optional(),
+    preferred_pattern: z.string().optional(),
+    future_rule: z.string().min(1),
+    applies_to: z
+      .object({
+        language: z.string().optional(),
+        framework: z.string().optional(),
+        toolchain: z.string().optional(),
+        error_class: z.string().optional(),
+        file_path: z.string().optional(),
+        error_signature_id: z.string().optional(),
+        error_signature_hash: z.string().optional(),
+      })
+      .optional(),
+    confidence: z.number().min(0).max(1).optional().default(0.9),
+  })
+  .strict();
+
+const listUserCorrectionsInputSchema = z
+  .object({
+    ...workspacePathField,
+    limit: z.number().int().min(1).max(500).optional().default(50),
+    correction_type: z.enum(["rejected_fix", "project_preference"]).optional(),
+    language: z.string().optional(),
+    framework: z.string().optional(),
+    toolchain: z.string().optional(),
+    error_class: z.string().optional(),
   })
   .strict();
 
@@ -816,7 +854,7 @@ async function commitPostmortem(cwd: string, input: CommitPostmortemInput & { wo
 
 async function readProjectMemory(
   cwd: string,
-  input: { type?: "incident" | "fact" | "decision"; limit: number; workspace_path?: string },
+  input: { type?: MemoryType; limit: number; workspace_path?: string },
 ): Promise<Record<string, unknown>> {
   const data = await buildIdentityAndProfile(cwd, input.workspace_path);
   const { store } = await ensureStore(data.agentRoot);
@@ -902,6 +940,24 @@ export async function searchProjectExperience(
       queryVector,
       store,
     });
+    const corrections = store.listUserCorrections(
+      data.identity.project_id,
+      {
+        language: input.filters?.language,
+        toolchain: input.filters?.toolchain,
+        error_class: input.filters?.error_class,
+      },
+      100,
+    );
+    const warnings = buildCorrectionWarnings(
+      corrections,
+      {
+        query: input.query,
+        language: input.filters?.language,
+        toolchain: input.filters?.toolchain,
+        error_class: input.filters?.error_class,
+      },
+    );
     return {
       ok: true,
       tool: "search_project_experience",
@@ -914,6 +970,112 @@ export async function searchProjectExperience(
       note: hybrid.note,
       count: hybrid.results.length,
       results: hybrid.results,
+      warnings,
+    };
+  } finally {
+    store.close();
+  }
+}
+
+export async function recordUserCorrection(
+  cwd: string,
+  input: z.infer<typeof recordUserCorrectionInputSchema>,
+): Promise<Record<string, unknown>> {
+  const data = await buildIdentityAndProfile(cwd, input.workspace_path);
+  const { store } = await ensureStore(data.agentRoot);
+  try {
+    const appliesTo = { ...(input.applies_to ?? {}) } as Record<string, unknown>;
+    if (typeof appliesTo.file_path === "string") {
+      const safe = resolveWorkspacePathSafely(data.workspaceRoot, appliesTo.file_path);
+      if (!safe.ok) return { ok: false, reason: safe.reason, file_path: appliesTo.file_path };
+    }
+    if (typeof appliesTo.error_signature_id === "string") {
+      const sig = store.getErrorSignatureById(appliesTo.error_signature_id);
+      if (!sig) return { ok: false, reason: "error_signature_not_found", error_signature_id: appliesTo.error_signature_id };
+      if (sig.project_id !== data.identity.project_id) {
+        return { ok: false, reason: "error_signature_project_mismatch", error_signature_id: appliesTo.error_signature_id };
+      }
+      appliesTo.error_signature_hash = sig.signature_hash;
+    }
+    if (typeof appliesTo.error_signature_hash === "string") {
+      const sigByHash = store.getErrorSignatureByHash(data.identity.project_id, appliesTo.error_signature_hash);
+      if (sigByHash) appliesTo.error_signature_id = sigByHash.id;
+    }
+    const summary = `${input.future_rule} (${input.correction_type})`;
+    const inserted = store.insertMemoryRecord(data.identity.project_id, {
+      type: input.correction_type,
+      scope: "workspace-only",
+      content: summary,
+      confidence: input.confidence,
+      metadata: {
+        source: "user_correction",
+        context: input.context,
+        user_feedback: input.user_feedback,
+        rejected_pattern: input.rejected_pattern ?? null,
+        preferred_pattern: input.preferred_pattern ?? null,
+        future_rule: input.future_rule,
+        applies_to: appliesTo,
+        confidence: input.confidence,
+        created_by: "user",
+        verification_status: "user_preference_not_test_verified",
+        summary,
+      },
+    });
+    return {
+      ok: true,
+      tool: "record_user_correction",
+      project_id: data.identity.project_id,
+      workspace_relative_path: data.identity.workspace_relative_path,
+      memory_id: inserted.id,
+      memory_type: input.correction_type,
+      summary,
+      applies_to: appliesTo,
+      metadata: {
+        verification_status: "user_preference_not_test_verified",
+      },
+    };
+  } finally {
+    store.close();
+  }
+}
+
+export async function listUserCorrections(
+  cwd: string,
+  input: z.infer<typeof listUserCorrectionsInputSchema>,
+): Promise<Record<string, unknown>> {
+  const data = await buildIdentityAndProfile(cwd, input.workspace_path);
+  const { store } = await ensureStore(data.agentRoot);
+  try {
+    const corrections = store.listUserCorrections(
+      data.identity.project_id,
+      {
+        correction_type: input.correction_type,
+        language: input.language,
+        framework: input.framework,
+        toolchain: input.toolchain,
+        error_class: input.error_class,
+      },
+      input.limit,
+    );
+    return {
+      ok: true,
+      tool: "list_user_corrections",
+      project_id: data.identity.project_id,
+      workspace_relative_path: data.identity.workspace_relative_path,
+      corrections: corrections.map((row) => ({
+        id: row.id,
+        type: row.type,
+        content: row.content,
+        summary: row.metadata.summary ?? row.content,
+        rejected_pattern: row.metadata.rejected_pattern ?? null,
+        preferred_pattern: row.metadata.preferred_pattern ?? null,
+        future_rule: row.metadata.future_rule ?? row.content,
+        applies_to: row.metadata.applies_to ?? {},
+        confidence: row.confidence,
+        created_at: row.created_at,
+        retrieval_hits: row.retrieval_hits,
+        last_retrieved_at: row.last_retrieved_at,
+      })),
     };
   } finally {
     store.close();
@@ -1001,6 +1163,67 @@ function resolveWorkspacePathSafely(workspaceRoot: string, filePath: string): { 
     return { ok: false, reason: "path_traversal_rejected" };
   }
   return { ok: true, fullPath: resolved };
+}
+
+function normalizeLower(value: unknown): string {
+  return String(value ?? "").trim().toLowerCase();
+}
+
+function buildCorrectionWarnings(
+  corrections: Array<{
+    id: string;
+    type: string;
+    confidence: number;
+    metadata: Record<string, unknown>;
+  }>,
+  input: {
+    query: string;
+    toolchain?: string;
+    language?: string;
+    error_class?: string;
+  },
+): Array<Record<string, unknown>> {
+  const q = normalizeLower(input.query);
+  return corrections
+    .map((row) => {
+      const applies = (row.metadata.applies_to as Record<string, unknown> | undefined) ?? {};
+      const rejectedPattern = String(row.metadata.rejected_pattern ?? "");
+      const preferredPattern = String(row.metadata.preferred_pattern ?? "");
+      const futureRule = String(row.metadata.future_rule ?? "");
+      let score = 0;
+      let reason = "general_preference";
+      if (rejectedPattern && q.includes(normalizeLower(rejectedPattern))) {
+        score += 4;
+        reason = "query_matches_rejected_pattern";
+      }
+      if (input.error_class && normalizeLower(applies.error_class) === normalizeLower(input.error_class)) {
+        score += 3;
+        reason = "matching_error_class";
+      }
+      if (input.toolchain && normalizeLower(applies.toolchain) === normalizeLower(input.toolchain)) {
+        score += 2;
+        reason = "matching_toolchain";
+      }
+      if (input.language && normalizeLower(applies.language) === normalizeLower(input.language)) {
+        score += 2;
+        reason = "matching_language";
+      }
+      if (score === 0 && row.type === "project_preference") score = 1;
+      return {
+        memory_id: row.id,
+        type: row.type,
+        reason,
+        rejected_pattern: rejectedPattern || null,
+        preferred_pattern: preferredPattern || null,
+        future_rule: futureRule || null,
+        confidence: row.confidence,
+        score,
+      };
+    })
+    .filter((row) => row.score > 0)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 6)
+    .map(({ score: _score, ...rest }) => rest);
 }
 
 function countExactOccurrences(content: string, searchBlock: string): number {
@@ -1507,6 +1730,19 @@ async function suggestNextActions(
       .slice(0, 500);
     const query = input.query ?? (derivedQuery || verified.taskRun.task_text);
     const results = store.searchProjectExperience(data.identity.project_id, query, {}, input.limit);
+    const correctionRows = store.listUserCorrections(data.identity.project_id, {}, 100);
+    const warningRows = buildCorrectionWarnings(correctionRows, {
+      query,
+      language: String(normalized.detected_language ?? normalized.language ?? ""),
+      toolchain: String(normalized.detected_toolchain ?? normalized.toolchain ?? ""),
+      error_class: String(normalized.error_class ?? ""),
+    });
+    const cautionFromCorrections = warningRows.map((w) => {
+      const avoid = w.rejected_pattern ? `Avoid ${String(w.rejected_pattern)}.` : "Avoid previously rejected fix pattern.";
+      const prefer = w.preferred_pattern ? ` Prefer ${String(w.preferred_pattern)}.` : "";
+      const rule = w.future_rule ? ` ${String(w.future_rule)}` : "";
+      return `${avoid}${prefer}${rule}`.trim();
+    });
     return {
       ok: true,
       tool: "suggest_next_actions",
@@ -1517,6 +1753,7 @@ async function suggestNextActions(
         "Do not patch unless the target block is exact and unique.",
         "Do not commit memory until the fix has been verified.",
         "Stay within the task command budget.",
+        ...cautionFromCorrections,
       ],
       recommended_command_to_run_next: commandRecommendation(normalized),
     };
@@ -1878,8 +2115,9 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
       inputSchema: {
         type: "object",
         properties: {
-          type: { type: "string", enum: ["incident", "fact", "decision"] },
+          type: { type: "string", enum: [...memoryTypeValues] },
           limit: { type: "number", minimum: 1, maximum: 100, default: 10 },
+          workspace_path: { type: "string" },
         },
         additionalProperties: false,
       },
@@ -1890,11 +2128,12 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
       inputSchema: {
         type: "object",
         properties: {
-          type: { type: "string", enum: ["incident", "fact", "decision"], default: "incident" },
+          type: { type: "string", enum: [...memoryTypeValues], default: "incident" },
           scope: { type: "string", enum: ["workspace-only", "project-only", "repo-family"], default: "workspace-only" },
           content: { type: "string" },
           confidence: { type: "number", minimum: 0, maximum: 1, default: 0.8 },
           metadata: { type: "object", additionalProperties: true },
+          workspace_path: { type: "string" },
         },
         required: ["content"],
         additionalProperties: false,
@@ -1906,6 +2145,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
       inputSchema: {
         type: "object",
         properties: {
+          workspace_path: { type: "string" },
           raw_log: { type: "string" },
           command_kind: { type: "string", enum: ["test", "lint", "build", "typecheck", "run", "unknown"] },
           workspace: { type: "string" },
@@ -1921,12 +2161,13 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
       inputSchema: {
         type: "object",
         properties: {
+          workspace_path: { type: "string" },
           query: { type: "string" },
           mode: { type: "string", enum: ["auto", "text", "vector", "hybrid"], default: "auto" },
           filters: {
             type: "object",
             properties: {
-              type: { type: "string", enum: ["incident", "fact", "decision"] },
+              type: { type: "string", enum: [...memoryTypeValues] },
               workspace: { type: "string" },
               toolchain: { type: "string" },
               language: { type: "string" },
@@ -1951,6 +2192,43 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           limit: { type: "number", minimum: 1, maximum: 200, default: 20 },
           min_occurrences: { type: "number", minimum: 1, maximum: 1000, default: 2 },
           language: { type: "string" },
+          toolchain: { type: "string" },
+          error_class: { type: "string" },
+        },
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "record_user_correction",
+      description: "Store user rejection/preference guidance as workspace-scoped memory.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          workspace_path: { type: "string" },
+          correction_type: { type: "string", enum: ["rejected_fix", "project_preference"], default: "project_preference" },
+          context: { type: "string" },
+          user_feedback: { type: "string" },
+          rejected_pattern: { type: "string" },
+          preferred_pattern: { type: "string" },
+          future_rule: { type: "string" },
+          applies_to: { type: "object", additionalProperties: true },
+          confidence: { type: "number", minimum: 0, maximum: 1, default: 0.9 },
+        },
+        required: ["context", "user_feedback", "future_rule"],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "list_user_corrections",
+      description: "List workspace-scoped user corrections and project preferences.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          workspace_path: { type: "string" },
+          limit: { type: "number", minimum: 1, maximum: 500, default: 50 },
+          correction_type: { type: "string", enum: ["rejected_fix", "project_preference"] },
+          language: { type: "string" },
+          framework: { type: "string" },
           toolchain: { type: "string" },
           error_class: { type: "string" },
         },
@@ -2227,6 +2505,18 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   if (request.params.name === "get_recurring_errors") {
     const parsed = getRecurringErrorsInputSchema.parse(request.params.arguments ?? {});
     const result = await getRecurringErrors(process.cwd(), parsed);
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+
+  if (request.params.name === "record_user_correction") {
+    const parsed = recordUserCorrectionInputSchema.parse(request.params.arguments ?? {});
+    const result = await recordUserCorrection(process.cwd(), parsed);
+    return { content: [{ type: "text", text: JSON.stringify(result) }], isError: result.ok === false };
+  }
+
+  if (request.params.name === "list_user_corrections") {
+    const parsed = listUserCorrectionsInputSchema.parse(request.params.arguments ?? {});
+    const result = await listUserCorrections(process.cwd(), parsed);
     return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 

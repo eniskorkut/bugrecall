@@ -31,7 +31,7 @@ export type StructuredCommand = {
 };
 
 export type CommitPostmortemInput = {
-  type: "incident" | "fact" | "decision";
+  type: "incident" | "fact" | "decision" | "rejected_fix" | "project_preference";
   scope: "workspace-only" | "project-only" | "repo-family";
   content: string;
   confidence: number;
@@ -54,7 +54,7 @@ export type MemoryRecord = {
 };
 
 export type SearchExperienceFilters = {
-  type?: "incident" | "fact" | "decision";
+  type?: "incident" | "fact" | "decision" | "rejected_fix" | "project_preference";
   workspace?: string;
   toolchain?: string;
   language?: string;
@@ -155,6 +155,14 @@ export type MemoryListFilters = {
   type?: string;
   status?: string;
   language?: string;
+  toolchain?: string;
+  error_class?: string;
+};
+
+export type UserCorrectionFilters = {
+  correction_type?: "rejected_fix" | "project_preference";
+  language?: string;
+  framework?: string;
   toolchain?: string;
   error_class?: string;
 };
@@ -1118,6 +1126,48 @@ export class SqliteStore {
       .prepare("SELECT COUNT(*) as count FROM patch_history WHERE project_id = ?")
       .get(projectId) as { count: number } | undefined;
     return row ? Number(row.count) : 0;
+  }
+
+  listUserCorrections(projectId: string, filters: UserCorrectionFilters, limit: number): MemoryRecord[] {
+    const limitSafe = Math.max(1, Math.min(500, limit));
+    const rows = this.db
+      .prepare(
+        `
+      SELECT id, project_id, type, scope, content, metadata_json, status, confidence, created_at, updated_at, last_retrieved_at, retrieval_hits
+      FROM memory_records
+      WHERE project_id = ? AND type IN ('rejected_fix', 'project_preference')
+      ORDER BY datetime(created_at) DESC
+      LIMIT 2000
+    `,
+      )
+      .all(projectId) as Array<Record<string, unknown>>;
+
+    const mapped = rows.map((row) => ({
+      id: String(row.id),
+      project_id: String(row.project_id),
+      type: String(row.type),
+      scope: String(row.scope),
+      content: String(row.content),
+      metadata: safeJsonParse<Record<string, unknown>>(String(row.metadata_json), {}),
+      status: String(row.status),
+      confidence: Number(row.confidence),
+      created_at: String(row.created_at),
+      updated_at: String(row.updated_at),
+      last_retrieved_at: row.last_retrieved_at ? String(row.last_retrieved_at) : null,
+      retrieval_hits: Number(row.retrieval_hits ?? 0),
+    }));
+
+    return mapped
+      .filter((row) => (filters.correction_type ? row.type === filters.correction_type : true))
+      .filter((row) => {
+        const appliesTo = safeJsonParse<Record<string, unknown>>(JSON.stringify(row.metadata.applies_to ?? {}), {});
+        if (filters.language && String(appliesTo.language ?? row.metadata.language ?? "") !== filters.language) return false;
+        if (filters.framework && String(appliesTo.framework ?? row.metadata.framework ?? "") !== filters.framework) return false;
+        if (filters.toolchain && String(appliesTo.toolchain ?? row.metadata.toolchain ?? "") !== filters.toolchain) return false;
+        if (filters.error_class && String(appliesTo.error_class ?? row.metadata.error_class ?? "") !== filters.error_class) return false;
+        return true;
+      })
+      .slice(0, limitSafe);
   }
 
   upsertErrorSignature(input: ErrorSignatureUpsertInput): ErrorSignatureRow {

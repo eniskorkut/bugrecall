@@ -20,7 +20,7 @@ export type VectorIndexRow = {
 };
 
 export type VectorSearchFilters = {
-  type?: "incident" | "fact" | "decision";
+  type?: "incident" | "fact" | "decision" | "rejected_fix" | "project_preference";
   workspace?: string;
   toolchain?: string;
   language?: string;

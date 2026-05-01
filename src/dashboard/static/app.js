@@ -20,6 +20,7 @@ const ui = {
   taskData: document.getElementById("task-data"),
   taskAttempts: document.getElementById("task-attempts"),
   recurringErrorsData: document.getElementById("recurring-errors-data"),
+  userCorrectionsData: document.getElementById("user-corrections-data"),
 };
 
 let selectedMemoryId = null;
@@ -53,6 +54,15 @@ function fmtDate(input) {
 
 function shortId(id) {
   return String(id || "").slice(0, 8);
+}
+
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
 }
 
 function statusBadge(status) {
@@ -173,12 +183,12 @@ async function loadMemories() {
       const detail = await fetchApi(`/api/memories/${encodeURIComponent(r.id)}`);
       const m = detail.record || {};
       ui.memoryDetail.innerHTML = `<div class="result-top">
-        <span class="mono">${m.id || "-"}</span>
+        <span class="mono">${escapeHtml(m.id || "-")}</span>
         ${statusBadge(m.status)}
-        <span>${m.type || "-"}</span>
+        <span>${escapeHtml(m.type || "-")}</span>
       </div>
-      <p>${detailValue(m.content)}</p>
-      <pre class="code small">${JSON.stringify(
+      <p>${escapeHtml(detailValue(m.content))}</p>
+      <pre class="code small">${escapeHtml(JSON.stringify(
         {
           symptoms: m.symptoms || "-",
           root_cause: m.root_cause || "-",
@@ -191,7 +201,7 @@ async function loadMemories() {
         },
         null,
         2,
-      )}</pre>`;
+      ))}</pre>`;
     };
     ui.memoryTableBody.appendChild(tr);
   });
@@ -214,12 +224,12 @@ async function runSearch() {
     .map(
       (r) => `<article class="result-card">
       <div class="result-top">
-        <span class="mono">${shortId(r.id)}</span>
-        <span class="pill">${r.reason || "-"}</span>
+        <span class="mono">${escapeHtml(shortId(r.id))}</span>
+        <span class="pill">${escapeHtml(r.reason || "-")}</span>
         <span>score: ${Number(r.score || 0).toFixed(2)}</span>
       </div>
-      <p>${r.content || "-"}</p>
-      <pre class="code small">${JSON.stringify(r.metadata || {}, null, 2)}</pre>
+      <p>${escapeHtml(r.content || "-")}</p>
+      <pre class="code small">${escapeHtml(JSON.stringify(r.metadata || {}, null, 2))}</pre>
     </article>`,
     )
     .join("");
@@ -272,21 +282,47 @@ function renderRecurringErrors(data) {
     ${rows
       .map(
         (r) =>
-          `<tr><td>${r.error_class || "-"}</td><td>${r.normalized_message || "-"}</td><td>${r.language || "-"} / ${r.toolchain || "-"}</td><td>${r.occurrence_count || 0}</td><td>${fmtDate(r.last_seen_at)}</td><td>${r.has_verified_fix ? "verified" : "open"}</td></tr>`,
+          `<tr><td>${escapeHtml(r.error_class || "-")}</td><td>${escapeHtml(r.normalized_message || "-")}</td><td>${escapeHtml(r.language || "-")} / ${escapeHtml(r.toolchain || "-")}</td><td>${r.occurrence_count || 0}</td><td>${fmtDate(r.last_seen_at)}</td><td>${r.has_verified_fix ? "verified" : "open"}</td></tr>`,
+      )
+      .join("")}
+  </tbody></table></div>`;
+}
+
+function renderUserCorrections(data) {
+  const rows = data.corrections || [];
+  if (!rows.length) {
+    ui.userCorrectionsData.innerHTML = `<div class="empty">No user corrections yet. When you reject an agent's fix strategy, Bugrecall can remember it here.</div>`;
+    return;
+  }
+  ui.userCorrectionsData.innerHTML = `<div class="table-wrap"><table><thead><tr><th>type</th><th>future rule</th><th>rejected</th><th>preferred</th><th>applies_to</th><th>confidence</th><th>created</th></tr></thead><tbody>
+    ${rows
+      .map(
+        (r) =>
+          `<tr>
+            <td>${escapeHtml(r.type || "-")}</td>
+            <td>${escapeHtml(r.future_rule || "-")}</td>
+            <td>${escapeHtml(r.rejected_pattern || "-")}</td>
+            <td>${escapeHtml(r.preferred_pattern || "-")}</td>
+            <td class="mono">${escapeHtml(JSON.stringify(r.applies_to || {}))}</td>
+            <td>${Number(r.confidence || 0).toFixed(2)}</td>
+            <td>${fmtDate(r.created_at)}</td>
+          </tr>`,
       )
       .join("")}
   </tbody></table></div>`;
 }
 
 async function refreshReadOnlySections() {
-  const [patch, tasks, recurring] = await Promise.all([
+  const [patch, tasks, recurring, corrections] = await Promise.all([
     fetchApi("/api/patch-history?limit=100"),
     fetchApi("/api/task-runs?limit=100"),
     fetchApi("/api/recurring-errors?limit=20&min_occurrences=2"),
+    fetchApi("/api/user-corrections?limit=50"),
   ]);
   renderPatchHistory(patch);
   renderTaskRuns(tasks);
   renderRecurringErrors(recurring);
+  renderUserCorrections(corrections);
 }
 
 async function withAction(button, busyLabel, fn) {
