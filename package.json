@@ -27,7 +27,8 @@
     "phase11a:check": "npm run build && node dist/scripts/phase11a-check.js",
     "phase11b:check": "npm run build && node dist/scripts/phase11b-check.js",
     "phase11c:check": "npm run build && node dist/scripts/phase11c-check.js",
-    "phase11d:check": "npm run build && node dist/scripts/phase11d-check.js"
+    "phase11d:check": "npm run build && node dist/scripts/phase11d-check.js",
+    "phase12a:check": "node dist/scripts/phase12a-check.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.0",

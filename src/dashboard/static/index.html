@@ -29,6 +29,7 @@
           <button class="tab active" data-tab="overview"><span>Overview</span></button>
           <button class="tab" data-tab="search"><span>Search</span></button>
           <button class="tab" data-tab="memories"><span>Memories</span></button>
+          <button class="tab" data-tab="recurring-errors"><span>Recurring Errors</span></button>
           <button class="tab" data-tab="vectorization"><span>Vectorization</span></button>
           <button class="tab" data-tab="patch-history"><span>Patch History</span></button>
           <button class="tab" data-tab="task-runs"><span>Task Runs</span></button>
@@ -113,6 +114,16 @@
           <button id="index-btn" class="btn secondary">Index Ready Memories</button>
         </div>
         <pre class="code" id="vector-status"></pre>
+      </section>
+
+      <section class="panel" id="panel-recurring-errors">
+        <div class="section-head">
+          <div>
+            <h2>Recurring Errors</h2>
+            <p class="muted">Deterministic signatures with recurrence counts.</p>
+          </div>
+        </div>
+        <div id="recurring-errors-data"></div>
       </section>
 
       <section class="panel" id="panel-patch-history">

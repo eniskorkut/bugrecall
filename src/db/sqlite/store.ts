@@ -159,6 +159,41 @@ export type MemoryListFilters = {
   error_class?: string;
 };
 
+export type ErrorSignatureUpsertInput = {
+  project_id: string;
+  workspace_relative_path: string;
+  signature_hash: string;
+  language: string | null;
+  toolchain: string | null;
+  error_class: string | null;
+  normalized_message: string;
+  top_frame_symbol: string | null;
+  file_hint: string | null;
+  command_kind: string | null;
+  last_observation_json: Record<string, unknown>;
+};
+
+export type ErrorSignatureRow = {
+  id: string;
+  project_id: string;
+  workspace_relative_path: string;
+  signature_hash: string;
+  language: string | null;
+  toolchain: string | null;
+  error_class: string | null;
+  normalized_message: string;
+  top_frame_symbol: string | null;
+  file_hint: string | null;
+  command_kind: string | null;
+  occurrence_count: number;
+  first_seen_at: string;
+  last_seen_at: string;
+  linked_memory_id: string | null;
+  last_observation_json: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+};
+
 export class SqliteStore {
   private readonly db: Database.Database;
 
@@ -1083,6 +1118,230 @@ export class SqliteStore {
       .prepare("SELECT COUNT(*) as count FROM patch_history WHERE project_id = ?")
       .get(projectId) as { count: number } | undefined;
     return row ? Number(row.count) : 0;
+  }
+
+  upsertErrorSignature(input: ErrorSignatureUpsertInput): ErrorSignatureRow {
+    const now = new Date().toISOString();
+    const existing = this.db
+      .prepare(
+        `
+      SELECT id, occurrence_count
+      FROM error_signatures
+      WHERE project_id = ? AND signature_hash = ?
+    `,
+      )
+      .get(input.project_id, input.signature_hash) as { id: string; occurrence_count: number } | undefined;
+
+    if (existing) {
+      this.db
+        .prepare(
+          `
+        UPDATE error_signatures
+        SET
+          workspace_relative_path = @workspace_relative_path,
+          language = @language,
+          toolchain = @toolchain,
+          error_class = @error_class,
+          normalized_message = @normalized_message,
+          top_frame_symbol = @top_frame_symbol,
+          file_hint = @file_hint,
+          command_kind = @command_kind,
+          occurrence_count = occurrence_count + 1,
+          last_seen_at = @last_seen_at,
+          last_observation_json = @last_observation_json,
+          updated_at = @updated_at
+        WHERE id = @id
+      `,
+        )
+        .run({
+          ...input,
+          id: existing.id,
+          last_seen_at: now,
+          updated_at: now,
+          last_observation_json: JSON.stringify(input.last_observation_json),
+        });
+      const row = this.getErrorSignatureById(existing.id);
+      if (!row) throw new Error("error_signature_update_failed");
+      return row;
+    }
+
+    const id = randomUUID();
+    this.db
+      .prepare(
+        `
+      INSERT INTO error_signatures (
+        id, project_id, workspace_relative_path, signature_hash, language, toolchain, error_class,
+        normalized_message, top_frame_symbol, file_hint, command_kind, occurrence_count,
+        first_seen_at, last_seen_at, linked_memory_id, last_observation_json, created_at, updated_at
+      ) VALUES (
+        @id, @project_id, @workspace_relative_path, @signature_hash, @language, @toolchain, @error_class,
+        @normalized_message, @top_frame_symbol, @file_hint, @command_kind, 1,
+        @first_seen_at, @last_seen_at, NULL, @last_observation_json, @created_at, @updated_at
+      )
+    `,
+      )
+      .run({
+        ...input,
+        id,
+        first_seen_at: now,
+        last_seen_at: now,
+        created_at: now,
+        updated_at: now,
+        last_observation_json: JSON.stringify(input.last_observation_json),
+      });
+    const row = this.getErrorSignatureById(id);
+    if (!row) throw new Error("error_signature_insert_failed");
+    return row;
+  }
+
+  insertErrorOccurrence(input: {
+    signature_id: string;
+    project_id: string;
+    task_run_id?: string | null;
+    command_kind?: string | null;
+    normalized_error_json: Record<string, unknown>;
+    raw_log_hash?: string | null;
+  }): string {
+    const id = randomUUID();
+    this.db
+      .prepare(
+        `
+      INSERT INTO error_occurrences (
+        id, signature_id, project_id, task_run_id, command_kind, normalized_error_json, raw_log_hash, created_at
+      ) VALUES (
+        @id, @signature_id, @project_id, @task_run_id, @command_kind, @normalized_error_json, @raw_log_hash, @created_at
+      )
+    `,
+      )
+      .run({
+        id,
+        signature_id: input.signature_id,
+        project_id: input.project_id,
+        task_run_id: input.task_run_id ?? null,
+        command_kind: input.command_kind ?? null,
+        normalized_error_json: JSON.stringify(input.normalized_error_json),
+        raw_log_hash: input.raw_log_hash ?? null,
+        created_at: new Date().toISOString(),
+      });
+    return id;
+  }
+
+  listRecurringErrors(
+    projectId: string,
+    options: {
+      limit: number;
+      min_occurrences: number;
+      language?: string;
+      toolchain?: string;
+      error_class?: string;
+    },
+  ): ErrorSignatureRow[] {
+    const limitSafe = Math.max(1, Math.min(200, options.limit));
+    const minOccurrences = Math.max(1, options.min_occurrences);
+    const rows = this.db
+      .prepare(
+        `
+      SELECT
+        id, project_id, workspace_relative_path, signature_hash, language, toolchain, error_class,
+        normalized_message, top_frame_symbol, file_hint, command_kind, occurrence_count,
+        first_seen_at, last_seen_at, linked_memory_id, last_observation_json, created_at, updated_at
+      FROM error_signatures
+      WHERE project_id = ? AND occurrence_count >= ?
+      ORDER BY occurrence_count DESC, datetime(last_seen_at) DESC
+      LIMIT ?
+    `,
+      )
+      .all(projectId, minOccurrences, limitSafe) as Array<Record<string, unknown>>;
+    return rows
+      .map((row) => this.mapErrorSignatureRow(row))
+      .filter((row) => (options.language ? row.language === options.language : true))
+      .filter((row) => (options.toolchain ? row.toolchain === options.toolchain : true))
+      .filter((row) => (options.error_class ? row.error_class === options.error_class : true));
+  }
+
+  getErrorSignatureById(id: string): ErrorSignatureRow | null {
+    const row = this.db
+      .prepare(
+        `
+      SELECT
+        id, project_id, workspace_relative_path, signature_hash, language, toolchain, error_class,
+        normalized_message, top_frame_symbol, file_hint, command_kind, occurrence_count,
+        first_seen_at, last_seen_at, linked_memory_id, last_observation_json, created_at, updated_at
+      FROM error_signatures
+      WHERE id = ?
+    `,
+      )
+      .get(id) as Record<string, unknown> | undefined;
+    return row ? this.mapErrorSignatureRow(row) : null;
+  }
+
+  getErrorSignatureByHash(projectId: string, signatureHash: string): ErrorSignatureRow | null {
+    const row = this.db
+      .prepare(
+        `
+      SELECT
+        id, project_id, workspace_relative_path, signature_hash, language, toolchain, error_class,
+        normalized_message, top_frame_symbol, file_hint, command_kind, occurrence_count,
+        first_seen_at, last_seen_at, linked_memory_id, last_observation_json, created_at, updated_at
+      FROM error_signatures
+      WHERE project_id = ? AND signature_hash = ?
+    `,
+      )
+      .get(projectId, signatureHash) as Record<string, unknown> | undefined;
+    return row ? this.mapErrorSignatureRow(row) : null;
+  }
+
+  getLatestErrorSignatureForTaskRun(projectId: string, taskRunId: string): ErrorSignatureRow | null {
+    const row = this.db
+      .prepare(
+        `
+      SELECT es.id, es.project_id, es.workspace_relative_path, es.signature_hash, es.language, es.toolchain, es.error_class,
+             es.normalized_message, es.top_frame_symbol, es.file_hint, es.command_kind, es.occurrence_count,
+             es.first_seen_at, es.last_seen_at, es.linked_memory_id, es.last_observation_json, es.created_at, es.updated_at
+      FROM error_occurrences eo
+      INNER JOIN error_signatures es ON es.id = eo.signature_id
+      WHERE eo.project_id = ? AND eo.task_run_id = ?
+      ORDER BY datetime(eo.created_at) DESC
+      LIMIT 1
+    `,
+      )
+      .get(projectId, taskRunId) as Record<string, unknown> | undefined;
+    return row ? this.mapErrorSignatureRow(row) : null;
+  }
+
+  linkErrorSignatureToMemory(signatureId: string, memoryId: string): void {
+    this.db
+      .prepare(
+        `
+      UPDATE error_signatures
+      SET linked_memory_id = ?, updated_at = ?
+      WHERE id = ?
+    `,
+      )
+      .run(memoryId, new Date().toISOString(), signatureId);
+  }
+
+  private mapErrorSignatureRow(row: Record<string, unknown>): ErrorSignatureRow {
+    return {
+      id: String(row.id),
+      project_id: String(row.project_id),
+      workspace_relative_path: String(row.workspace_relative_path),
+      signature_hash: String(row.signature_hash),
+      language: row.language ? String(row.language) : null,
+      toolchain: row.toolchain ? String(row.toolchain) : null,
+      error_class: row.error_class ? String(row.error_class) : null,
+      normalized_message: String(row.normalized_message ?? ""),
+      top_frame_symbol: row.top_frame_symbol ? String(row.top_frame_symbol) : null,
+      file_hint: row.file_hint ? String(row.file_hint) : null,
+      command_kind: row.command_kind ? String(row.command_kind) : null,
+      occurrence_count: Number(row.occurrence_count ?? 0),
+      first_seen_at: String(row.first_seen_at ?? ""),
+      last_seen_at: String(row.last_seen_at ?? ""),
+      linked_memory_id: row.linked_memory_id ? String(row.linked_memory_id) : null,
+      last_observation_json: safeJsonParse<Record<string, unknown>>(String(row.last_observation_json ?? "{}"), {}),
+      created_at: String(row.created_at ?? ""),
+      updated_at: String(row.updated_at ?? ""),
+    };
   }
 }
 

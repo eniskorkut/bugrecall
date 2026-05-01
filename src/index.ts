@@ -10,6 +10,7 @@ import { gunzipSync, gzipSync } from "node:zlib";
 import { z } from "zod";
 import { normalizeTerminalError } from "./engine/normalization/index.js";
 import type { CommandKind } from "./engine/normalization/types.js";
+import { extractSignatureFields } from "./engine/signatures/errorSignature.js";
 import { getEmbeddingClient } from "./engine/embedding/embeddingClient.js";
 import { getEmbeddingConfig } from "./engine/embedding/config.js";
 import { clearVectorProject, getVectorStoreStatus, upsertVectors } from "./db/vector/lanceStore.js";
@@ -21,6 +22,7 @@ import {
   type SearchExperienceFilters,
   type StructuredCommand,
   type TaskBudget,
+  type ErrorSignatureRow,
   SqliteStore,
 } from "./db/sqlite/store.js";
 
@@ -92,6 +94,17 @@ const searchProjectExperienceInputSchema = z
       .optional(),
     limit: z.number().int().min(1).max(50).optional().default(5),
     mode: z.enum(["auto", "text", "vector", "hybrid"]).optional().default("auto"),
+  })
+  .strict();
+
+const getRecurringErrorsInputSchema = z
+  .object({
+    ...workspacePathField,
+    limit: z.number().int().min(1).max(200).optional().default(20),
+    min_occurrences: z.number().int().min(1).max(1000).optional().default(2),
+    language: z.string().optional(),
+    toolchain: z.string().optional(),
+    error_class: z.string().optional(),
   })
   .strict();
 
@@ -223,6 +236,8 @@ const finalizeSuccessfulFixInputSchema = z
     toolchain: z.string().optional(),
     workspace: z.string().optional(),
     confidence: z.number().min(0).max(1).optional().default(0.9),
+    error_signature_id: z.string().optional(),
+    error_signature_hash: z.string().optional(),
   })
   .strict();
 
@@ -642,6 +657,65 @@ function commandRecommendation(normalized?: Record<string, unknown>): string | n
   return null;
 }
 
+function sha256Hex(input: string): string {
+  return createHash("sha256").update(input).digest("hex");
+}
+
+function mapSignatureForOutput(signature: ErrorSignatureRow): Record<string, unknown> {
+  return {
+    id: signature.id,
+    signature_hash: signature.signature_hash,
+    occurrence_count: signature.occurrence_count,
+    is_recurring: signature.occurrence_count > 1,
+    linked_memory_id: signature.linked_memory_id,
+    first_seen_at: signature.first_seen_at,
+    last_seen_at: signature.last_seen_at,
+  };
+}
+
+function upsertNormalizedErrorSignature(params: {
+  store: SqliteStore;
+  identity: ProjectIdentity;
+  profile: ProjectProfile;
+  normalized: ReturnType<typeof normalizeTerminalError>;
+  commandKind?: string;
+  taskRunId?: string;
+  rawLog?: string;
+}): { signature: ErrorSignatureRow; occurrenceId: string; fields: ReturnType<typeof extractSignatureFields> } {
+  const fields = extractSignatureFields(params.normalized, params.identity, params.profile, {
+    commandKind: params.commandKind,
+  });
+  const signature = params.store.upsertErrorSignature({
+    project_id: params.identity.project_id,
+    workspace_relative_path: params.identity.workspace_relative_path,
+    signature_hash: fields.signature_hash,
+    language: fields.language,
+    toolchain: fields.toolchain,
+    error_class: fields.error_class,
+    normalized_message: fields.normalized_message,
+    top_frame_symbol: fields.top_frame_symbol,
+    file_hint: fields.file_hint,
+    command_kind: fields.command_kind,
+    last_observation_json: {
+      normalized_error: params.normalized.normalized_error,
+      error_class: params.normalized.error_class,
+      detected_language: params.normalized.detected_language,
+      detected_toolchain: params.normalized.detected_toolchain,
+      detected_files: params.normalized.detected_files,
+      confidence: params.normalized.confidence,
+    },
+  });
+  const occurrenceId = params.store.insertErrorOccurrence({
+    signature_id: signature.id,
+    project_id: params.identity.project_id,
+    task_run_id: params.taskRunId ?? null,
+    command_kind: params.commandKind ?? null,
+    normalized_error_json: params.normalized,
+    raw_log_hash: params.rawLog ? sha256Hex(params.rawLog) : null,
+  });
+  return { signature, occurrenceId, fields };
+}
+
 async function runStructuredCommand(
   cmd: string,
   args: string[],
@@ -765,23 +839,37 @@ async function ingestTerminalError(
   input: { raw_log: string; command_kind?: CommandKind; workspace?: string; files?: string[]; workspace_path?: string },
 ): Promise<Record<string, unknown>> {
   const data = await buildIdentityAndProfile(cwd, input.workspace_path);
+  const { store } = await ensureStore(data.agentRoot);
   const normalized = normalizeTerminalError(input.raw_log, {
     command_kind: input.command_kind ?? "unknown",
     workspace: input.workspace,
     files: input.files,
   });
-
-  return {
-    ok: true,
-    tool: "ingest_terminal_error",
-    project_id: data.identity.project_id,
-    ...normalized,
-    metadata: {
-      ...normalized.metadata,
-      workspace: input.workspace ?? data.identity.workspace_relative_path,
-      memory_written: false,
-    },
-  };
+  try {
+    const tracked = upsertNormalizedErrorSignature({
+      store,
+      identity: data.identity,
+      profile: data.profile,
+      normalized,
+      commandKind: input.command_kind ?? "unknown",
+      rawLog: input.raw_log,
+    });
+    return {
+      ok: true,
+      tool: "ingest_terminal_error",
+      project_id: data.identity.project_id,
+      normalized_error: normalized,
+      error_signature: mapSignatureForOutput(tracked.signature),
+      occurrence_id: tracked.occurrenceId,
+      metadata: {
+        ...normalized.metadata,
+        workspace: input.workspace ?? data.identity.workspace_relative_path,
+        memory_written: false,
+      },
+    };
+  } finally {
+    store.close();
+  }
 }
 
 export async function searchProjectExperience(
@@ -1356,6 +1444,15 @@ async function recordErrorObservation(
       command_kind: commandKind as CommandKind,
       workspace: data.identity.workspace_relative_path,
     });
+    const tracked = upsertNormalizedErrorSignature({
+      store,
+      identity: data.identity,
+      profile: data.profile,
+      normalized,
+      commandKind: input.command_kind ?? "manual",
+      taskRunId: input.task_run_id,
+      rawLog: input.raw_output,
+    });
     const attemptKind = input.command_kind && input.command_kind !== "manual" ? "command" : "reasoning";
     store.insertTaskAttempt({
       task_run_id: input.task_run_id,
@@ -1373,6 +1470,8 @@ async function recordErrorObservation(
       ok: true,
       tool: "record_error_observation",
       normalized_error: normalized,
+      error_signature: mapSignatureForOutput(tracked.signature),
+      occurrence_id: tracked.occurrenceId,
       suggested_search_query: suggestedSearchQuery(normalized),
       suggested_filters: {
         language: normalized.detected_language !== "unknown" ? normalized.detected_language : undefined,
@@ -1442,6 +1541,8 @@ async function finalizeSuccessfulFix(
     toolchain?: string;
     workspace?: string;
     confidence: number;
+    error_signature_id?: string;
+    error_signature_hash?: string;
     workspace_path?: string;
   },
 ): Promise<Record<string, unknown>> {
@@ -1450,6 +1551,22 @@ async function finalizeSuccessfulFix(
   try {
     const verified = verifyTaskRunForProject(store, input.task_run_id, data.identity.project_id);
     if (!verified.ok) return verified.body;
+    let linkedSignature: ErrorSignatureRow | null = null;
+    if (input.error_signature_id) {
+      const byId = store.getErrorSignatureById(input.error_signature_id);
+      if (!byId) return { ok: false, reason: "error_signature_not_found", error_signature_id: input.error_signature_id };
+      if (byId.project_id !== data.identity.project_id) {
+        return { ok: false, reason: "error_signature_project_mismatch", error_signature_id: input.error_signature_id };
+      }
+      linkedSignature = byId;
+    } else if (input.error_signature_hash) {
+      const byHash = store.getErrorSignatureByHash(data.identity.project_id, input.error_signature_hash);
+      if (!byHash) return { ok: false, reason: "error_signature_not_found", error_signature_hash: input.error_signature_hash };
+      linkedSignature = byHash;
+    } else {
+      linkedSignature = store.getLatestErrorSignatureForTaskRun(data.identity.project_id, input.task_run_id);
+    }
+
     const metadata = {
       root_cause: input.root_cause,
       fix_pattern: input.fix_pattern,
@@ -1462,6 +1579,8 @@ async function finalizeSuccessfulFix(
       toolchain: input.toolchain,
       workspace: input.workspace ?? data.identity.workspace_relative_path,
       task_run_id: input.task_run_id,
+      linked_error_signature_id: linkedSignature?.id ?? null,
+      linked_error_signature_hash: linkedSignature?.signature_hash ?? null,
     };
     const inserted = store.insertMemoryRecord(data.identity.project_id, {
       type: "incident",
@@ -1479,6 +1598,9 @@ async function finalizeSuccessfulFix(
       success: true,
       metadata: { memory_record_id: inserted.id, status: inserted.status },
     });
+    if (linkedSignature) {
+      store.linkErrorSignatureToMemory(linkedSignature.id, inserted.id);
+    }
     return {
       ok: true,
       tool: "finalize_successful_fix",
@@ -1486,6 +1608,48 @@ async function finalizeSuccessfulFix(
       task_run_id: input.task_run_id,
       status: "succeeded",
       vectorization_status: inserted.status,
+      linked_error_signature_id: linkedSignature?.id ?? null,
+      linked_error_signature_hash: linkedSignature?.signature_hash ?? null,
+    };
+  } finally {
+    store.close();
+  }
+}
+
+export async function getRecurringErrors(
+  cwd: string,
+  input: {
+    workspace_path?: string;
+    limit: number;
+    min_occurrences: number;
+    language?: string;
+    toolchain?: string;
+    error_class?: string;
+  },
+): Promise<Record<string, unknown>> {
+  const data = await buildIdentityAndProfile(cwd, input.workspace_path);
+  const { store } = await ensureStore(data.agentRoot);
+  try {
+    const rows = store.listRecurringErrors(data.identity.project_id, input);
+    return {
+      ok: true,
+      tool: "get_recurring_errors",
+      project_id: data.identity.project_id,
+      workspace_relative_path: data.identity.workspace_relative_path,
+      recurring_errors: rows.map((row) => ({
+        id: row.id,
+        signature_hash: row.signature_hash,
+        error_class: row.error_class,
+        language: row.language,
+        toolchain: row.toolchain,
+        normalized_message: row.normalized_message,
+        file_hint: row.file_hint,
+        occurrence_count: row.occurrence_count,
+        first_seen_at: row.first_seen_at,
+        last_seen_at: row.last_seen_at,
+        linked_memory_id: row.linked_memory_id,
+        has_verified_fix: Boolean(row.linked_memory_id),
+      })),
     };
   } finally {
     store.close();
@@ -1778,6 +1942,22 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
       },
     },
     {
+      name: "get_recurring_errors",
+      description: "List recurring normalized error signatures for current workspace project.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          workspace_path: { type: "string" },
+          limit: { type: "number", minimum: 1, maximum: 200, default: 20 },
+          min_occurrences: { type: "number", minimum: 1, maximum: 1000, default: 2 },
+          language: { type: "string" },
+          toolchain: { type: "string" },
+          error_class: { type: "string" },
+        },
+        additionalProperties: false,
+      },
+    },
+    {
       name: "index_ready_memories",
       description: "Index ready memory embeddings into optional LanceDB vector store.",
       inputSchema: {
@@ -2041,6 +2221,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   if (request.params.name === "search_project_experience") {
     const parsed = searchProjectExperienceInputSchema.parse(request.params.arguments ?? {});
     const result = await searchProjectExperience(process.cwd(), parsed);
+    return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+
+  if (request.params.name === "get_recurring_errors") {
+    const parsed = getRecurringErrorsInputSchema.parse(request.params.arguments ?? {});
+    const result = await getRecurringErrors(process.cwd(), parsed);
     return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 

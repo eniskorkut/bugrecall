@@ -19,6 +19,7 @@ const ui = {
   patchData: document.getElementById("patch-data"),
   taskData: document.getElementById("task-data"),
   taskAttempts: document.getElementById("task-attempts"),
+  recurringErrorsData: document.getElementById("recurring-errors-data"),
 };
 
 let selectedMemoryId = null;
@@ -257,13 +258,31 @@ function renderTaskRuns(data) {
   });
 }
 
+function renderRecurringErrors(data) {
+  const rows = data.recurring_errors || [];
+  if (!rows.length) {
+    ui.recurringErrorsData.innerHTML = `<div class="empty">No recurring errors yet.</div>`;
+    return;
+  }
+  ui.recurringErrorsData.innerHTML = `<div class="table-wrap"><table><thead><tr><th>class</th><th>message</th><th>lang/toolchain</th><th>count</th><th>last seen</th><th>fix</th></tr></thead><tbody>
+    ${rows
+      .map(
+        (r) =>
+          `<tr><td>${r.error_class || "-"}</td><td>${r.normalized_message || "-"}</td><td>${r.language || "-"} / ${r.toolchain || "-"}</td><td>${r.occurrence_count || 0}</td><td>${fmtDate(r.last_seen_at)}</td><td>${r.has_verified_fix ? "yes" : "no"}</td></tr>`,
+      )
+      .join("")}
+  </tbody></table></div>`;
+}
+
 async function refreshReadOnlySections() {
-  const [patch, tasks] = await Promise.all([
+  const [patch, tasks, recurring] = await Promise.all([
     fetchApi("/api/patch-history?limit=100"),
     fetchApi("/api/task-runs?limit=100"),
+    fetchApi("/api/recurring-errors?limit=20&min_occurrences=2"),
   ]);
   renderPatchHistory(patch);
   renderTaskRuns(tasks);
+  renderRecurringErrors(recurring);
 }
 
 async function withAction(button, busyLabel, fn) {

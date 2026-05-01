@@ -119,4 +119,42 @@ ALTER TABLE snapshots ADD COLUMN project_id TEXT;
 ALTER TABLE snapshots ADD COLUMN workspace_relative_path TEXT;
 `,
   },
+  {
+    id: "0005_error_signatures",
+    sql: `
+CREATE TABLE IF NOT EXISTS error_signatures (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL,
+  workspace_relative_path TEXT NOT NULL,
+  signature_hash TEXT NOT NULL,
+  language TEXT,
+  toolchain TEXT,
+  error_class TEXT,
+  normalized_message TEXT,
+  top_frame_symbol TEXT,
+  file_hint TEXT,
+  command_kind TEXT,
+  occurrence_count INTEGER NOT NULL DEFAULT 1,
+  first_seen_at TEXT NOT NULL,
+  last_seen_at TEXT NOT NULL,
+  linked_memory_id TEXT,
+  last_observation_json TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(project_id, signature_hash)
+);
+
+CREATE TABLE IF NOT EXISTS error_occurrences (
+  id TEXT PRIMARY KEY,
+  signature_id TEXT NOT NULL,
+  project_id TEXT NOT NULL,
+  task_run_id TEXT,
+  command_kind TEXT,
+  normalized_error_json TEXT NOT NULL,
+  raw_log_hash TEXT,
+  created_at TEXT NOT NULL,
+  FOREIGN KEY(signature_id) REFERENCES error_signatures(id)
+);
+`,
+  },
 ];
