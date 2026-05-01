@@ -168,6 +168,13 @@ Codex/Claude/Cursor config UIs and file paths vary by version. Use the same stdi
 - Use `npm run package:check` for release-readiness validation and npm pack dry-run checks.
 - See [CHANGELOG.md](CHANGELOG.md), [SECURITY.md](SECURITY.md), and [docs/release.md](docs/release.md).
 
+## MVP status
+
+- Bugrecall is ready for local dogfooding as an MVP.
+- Package remains private (no npm publish yet).
+- Before testing in a real project, run `npm run final:check`.
+- Status doc: [docs/status.md](docs/status.md)
+
 ## Local data and privacy
 
 - Data is local under `.agent/` at repo root.

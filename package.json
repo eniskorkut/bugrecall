@@ -71,7 +71,8 @@
     "phase13b:check": "node dist/scripts/phase13b-check.js",
     "phase13c:check": "node dist/scripts/phase13c-check.js",
     "package:check": "node dist/scripts/package-check.js",
-    "phase13d:check": "node dist/scripts/phase13d-check.js"
+    "phase13d:check": "node dist/scripts/phase13d-check.js",
+    "final:check": "node dist/scripts/final-readiness-check.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.0",

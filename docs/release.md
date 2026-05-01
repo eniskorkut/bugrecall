@@ -12,9 +12,11 @@ npm run doctor
 npm run phase13a:check
 npm run phase13b:check
 npm run phase13c:check
+npm run phase13d:check
 npm run phase12e:check
 npm run eval:retrieval
 npm run package:check
+npm run final:check
 ```
 
 ## Package validation
@@ -26,6 +28,10 @@ npm pack --dry-run --json
 ```
 
 Confirm package contents exclude local artifacts (for example `.agent`, `*.db`, `.env`, `node_modules`).
+
+CI should run at minimum:
+- `phase13d:check`
+- `package:check`
 
 ## Dashboard smoke test
 

@@ -39,6 +39,9 @@ jobs:
       - name: Phase 13C check
         run: npm run phase13c:check
 
+      - name: Phase 13D check
+        run: npm run phase13d:check
+
       - name: Phase 12E check
         run: npm run phase12e:check
 
