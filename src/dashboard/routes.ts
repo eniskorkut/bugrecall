@@ -24,7 +24,8 @@ export async function handleApiRequest(cwd: string, method: string, pathname: st
     return { status: 200, body: { ok: true, service: "bugrecall-dashboard" } };
   }
 
-  const data = await buildIdentityAndProfile(cwd);
+  const workspacePath = url.searchParams.get("workspace_path") ?? undefined;
+  const data = await buildIdentityAndProfile(cwd, workspacePath);
   const { store } = await ensureStore(data.agentRoot);
   try {
     if (pathname === "/api/project" && method === "GET") {
@@ -40,7 +41,7 @@ export async function handleApiRequest(cwd: string, method: string, pathname: st
 
     if (pathname === "/api/overview" && method === "GET") {
       const counts = store.getMemoryCounts(data.identity.project_id);
-      const v = await getVectorizationStatus(cwd, {});
+      const v = await getVectorizationStatus(cwd, { workspace_path: workspacePath });
       const vectorStore = await getVectorStoreStatus();
       return {
         status: 200,
@@ -115,12 +116,12 @@ export async function handleApiRequest(cwd: string, method: string, pathname: st
       if (!q.trim()) return { status: 400, body: { ok: false, reason: "missing_query" } };
       const mode = parseMode(url.searchParams.get("mode"));
       const limit = parseLimit(url.searchParams.get("limit"), 10, 1, 50);
-      const result = await searchProjectExperience(cwd, { query: q, mode, limit, filters: {} });
+      const result = await searchProjectExperience(cwd, { query: q, mode, limit, filters: {}, workspace_path: workspacePath });
       return { status: 200, body: result };
     }
 
     if (pathname === "/api/vectorization/status" && method === "GET") {
-      const result = await getVectorizationStatus(cwd, {});
+      const result = await getVectorizationStatus(cwd, { workspace_path: workspacePath });
       return { status: 200, body: result };
     }
 
@@ -128,7 +129,7 @@ export async function handleApiRequest(cwd: string, method: string, pathname: st
       const body = bodyRaw ? (JSON.parse(bodyRaw) as Record<string, unknown>) : {};
       const limit = Math.max(1, Math.min(50, Number(body.limit ?? 10)));
       const retry_failed = Boolean(body.retry_failed ?? false);
-      const result = await vectorizePendingMemories(cwd, { limit, retry_failed });
+      const result = await vectorizePendingMemories(cwd, { limit, retry_failed, workspace_path: workspacePath });
       return { status: 200, body: result };
     }
 
@@ -136,7 +137,7 @@ export async function handleApiRequest(cwd: string, method: string, pathname: st
       const body = bodyRaw ? (JSON.parse(bodyRaw) as Record<string, unknown>) : {};
       const limit = Math.max(1, Math.min(500, Number(body.limit ?? 50)));
       const rebuild = Boolean(body.rebuild ?? false);
-      const result = await indexReadyMemories(cwd, { limit, rebuild });
+      const result = await indexReadyMemories(cwd, { limit, rebuild, workspace_path: workspacePath });
       return { status: 200, body: result };
     }
 

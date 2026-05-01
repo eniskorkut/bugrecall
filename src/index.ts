@@ -40,8 +40,16 @@ type ProjectProfile = ProjectProfileRow;
 
 type ProjectIdentity = ProjectIdentityRow;
 
+const workspacePathField = {
+  workspace_path: z.string().optional(),
+};
+
+const bootstrapProjectInputSchema = z.object(workspacePathField).strict();
+const getProjectProfileInputSchema = z.object(workspacePathField).strict();
+
 const readProjectMemoryInputSchema = z
   .object({
+    ...workspacePathField,
     type: z.enum(["incident", "fact", "decision"]).optional(),
     limit: z.number().int().min(1).max(100).optional().default(10),
   })
@@ -49,6 +57,7 @@ const readProjectMemoryInputSchema = z
 
 const commitPostmortemInputSchema = z
   .object({
+    ...workspacePathField,
     type: z.enum(["incident", "fact", "decision"]).default("incident"),
     scope: z.enum(["workspace-only", "project-only", "repo-family"]).default("workspace-only"),
     content: z.string().min(1),
@@ -59,6 +68,7 @@ const commitPostmortemInputSchema = z
 
 const ingestTerminalErrorInputSchema = z
   .object({
+    ...workspacePathField,
     raw_log: z.string().min(1),
     command_kind: z.enum(["test", "lint", "build", "typecheck", "run", "unknown"]).optional(),
     workspace: z.string().optional(),
@@ -68,6 +78,7 @@ const ingestTerminalErrorInputSchema = z
 
 const searchProjectExperienceInputSchema = z
   .object({
+    ...workspacePathField,
     query: z.string().min(1),
     filters: z
       .object({
@@ -86,6 +97,7 @@ const searchProjectExperienceInputSchema = z
 
 const vectorizePendingMemoriesInputSchema = z
   .object({
+    ...workspacePathField,
     limit: z.number().int().min(1).max(50).optional().default(10),
     retry_failed: z.boolean().optional().default(false),
   })
@@ -93,12 +105,14 @@ const vectorizePendingMemoriesInputSchema = z
 
 const getVectorizationStatusInputSchema = z
   .object({
+    ...workspacePathField,
     limit: z.number().int().min(1).max(1000).optional(),
   })
   .strict();
 
 const indexReadyMemoriesInputSchema = z
   .object({
+    ...workspacePathField,
     limit: z.number().int().min(1).max(500).optional().default(50),
     rebuild: z.boolean().optional().default(false),
   })
@@ -106,6 +120,7 @@ const indexReadyMemoriesInputSchema = z
 
 const applySearchReplacePatchInputSchema = z
   .object({
+    ...workspacePathField,
     file_path: z.string().min(1),
     search_block: z.string().min(1),
     replace_block: z.string(),
@@ -115,12 +130,14 @@ const applySearchReplacePatchInputSchema = z
 
 const restoreSnapshotInputSchema = z
   .object({
+    ...workspacePathField,
     snapshot_id: z.string().min(1),
   })
   .strict();
 
 const startTaskRunInputSchema = z
   .object({
+    ...workspacePathField,
     task_text: z.string().min(1),
     approval_budget: z
       .object({
@@ -137,12 +154,14 @@ const startTaskRunInputSchema = z
 
 const getTaskRunInputSchema = z
   .object({
+    ...workspacePathField,
     task_run_id: z.string().min(1),
   })
   .strict();
 
 const runProjectCommandInputSchema = z
   .object({
+    ...workspacePathField,
     task_run_id: z.string().min(1),
     kind: z.enum(["test", "lint", "build", "typecheck"]),
   })
@@ -150,6 +169,7 @@ const runProjectCommandInputSchema = z
 
 const logAttemptInputSchema = z
   .object({
+    ...workspacePathField,
     task_run_id: z.string().min(1),
     kind: z.enum(["patch", "command", "reasoning", "memory"]),
     summary: z.string().min(1),
@@ -160,6 +180,7 @@ const logAttemptInputSchema = z
 
 const createDebugSessionInputSchema = z
   .object({
+    ...workspacePathField,
     task_text: z.string().min(1),
     initial_context: z.string().optional(),
     approval_budget: startTaskRunInputSchema.shape.approval_budget,
@@ -168,6 +189,7 @@ const createDebugSessionInputSchema = z
 
 const recordErrorObservationInputSchema = z
   .object({
+    ...workspacePathField,
     task_run_id: z.string().min(1),
     raw_output: z.string().min(1),
     command_kind: z.enum(["test", "lint", "build", "typecheck", "manual"]).optional(),
@@ -177,6 +199,7 @@ const recordErrorObservationInputSchema = z
 
 const suggestNextActionsInputSchema = z
   .object({
+    ...workspacePathField,
     task_run_id: z.string().min(1),
     normalized_error: z.record(z.unknown()).optional(),
     query: z.string().optional(),
@@ -186,6 +209,7 @@ const suggestNextActionsInputSchema = z
 
 const finalizeSuccessfulFixInputSchema = z
   .object({
+    ...workspacePathField,
     task_run_id: z.string().min(1),
     summary: z.string().min(1),
     root_cause: z.string().min(1),
@@ -204,6 +228,7 @@ const finalizeSuccessfulFixInputSchema = z
 
 const failDebugSessionInputSchema = z
   .object({
+    ...workspacePathField,
     task_run_id: z.string().min(1),
     reason: z.string().min(1),
     summary: z.string().optional(),
@@ -263,6 +288,44 @@ function detectRepoRoot(cwd: string): { repoRoot: string; detected: boolean } {
   const root = runGit(["rev-parse", "--show-toplevel"], cwd);
   if (!root) return { repoRoot: cwd, detected: false };
   return { repoRoot: root, detected: true };
+}
+
+function isPathInside(parent: string, child: string): boolean {
+  const relative = path.relative(parent, child);
+  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
+class WorkspacePathResolutionError extends Error {
+  constructor(
+    public readonly reason:
+      | "invalid_workspace_path"
+      | "workspace_path_outside_repo"
+      | "workspace_path_not_found"
+      | "workspace_path_not_directory",
+    public readonly workspace_path: string,
+  ) {
+    super(reason);
+  }
+}
+
+async function resolveEffectiveWorkspaceCwd(baseCwd: string, workspacePath?: string): Promise<string> {
+  if (!workspacePath) return baseCwd;
+  const { repoRoot } = detectRepoRoot(baseCwd);
+  const raw = workspacePath.trim();
+  if (!raw) throw new WorkspacePathResolutionError("invalid_workspace_path", workspacePath);
+  let resolved: string;
+  try {
+    resolved = path.isAbsolute(raw) ? path.resolve(raw) : path.resolve(repoRoot, raw);
+  } catch {
+    throw new WorkspacePathResolutionError("invalid_workspace_path", workspacePath);
+  }
+  if (!isPathInside(repoRoot, resolved)) {
+    throw new WorkspacePathResolutionError("workspace_path_outside_repo", workspacePath);
+  }
+  const info = await stat(resolved).catch(() => null);
+  if (!info) throw new WorkspacePathResolutionError("workspace_path_not_found", workspacePath);
+  if (!info.isDirectory()) throw new WorkspacePathResolutionError("workspace_path_not_directory", workspacePath);
+  return resolved;
 }
 
 function detectWorkspaceRoot(cwd: string, repoRoot: string): string {
@@ -416,7 +479,7 @@ async function isAgentIgnored(repoRoot: string): Promise<boolean> {
   return lines.includes(".agent") || lines.includes(".agent/");
 }
 
-export async function buildIdentityAndProfile(cwd: string): Promise<{
+export async function buildIdentityAndProfile(cwd: string, workspacePath?: string): Promise<{
   identity: ProjectIdentity;
   profile: ProjectProfile;
   warnings: string[];
@@ -424,9 +487,10 @@ export async function buildIdentityAndProfile(cwd: string): Promise<{
   workspaceRoot: string;
   agentRoot: string;
 }> {
-  const repoResolution = detectRepoRoot(cwd);
+  const effectiveCwd = await resolveEffectiveWorkspaceCwd(cwd, workspacePath);
+  const repoResolution = detectRepoRoot(effectiveCwd);
   const repoRoot = repoResolution.repoRoot;
-  const workspaceRoot = detectWorkspaceRoot(cwd, repoRoot);
+  const workspaceRoot = detectWorkspaceRoot(effectiveCwd, repoRoot);
   const workspaceRelativePath = getWorkspaceRelativePath(repoRoot, workspaceRoot);
   const remoteUrl = runGit(["remote", "get-url", "origin"], repoRoot);
   const gitRemoteHash = remoteUrl ? sha256(remoteUrl) : null;
@@ -625,8 +689,8 @@ async function runStructuredCommand(
   });
 }
 
-async function bootstrapProject(cwd: string): Promise<Record<string, unknown>> {
-  const data = await buildIdentityAndProfile(cwd);
+async function bootstrapProject(cwd: string, workspace_path?: string): Promise<Record<string, unknown>> {
+  const data = await buildIdentityAndProfile(cwd, workspace_path);
   const { store, migrations } = await ensureStore(data.agentRoot);
   try {
     store.upsertProject(data.identity);
@@ -646,8 +710,8 @@ async function bootstrapProject(cwd: string): Promise<Record<string, unknown>> {
   };
 }
 
-async function getProjectProfile(cwd: string): Promise<Record<string, unknown>> {
-  const data = await buildIdentityAndProfile(cwd);
+async function getProjectProfile(cwd: string, workspace_path?: string): Promise<Record<string, unknown>> {
+  const data = await buildIdentityAndProfile(cwd, workspace_path);
   return {
     ok: true,
     tool: "get_project_profile",
@@ -657,8 +721,8 @@ async function getProjectProfile(cwd: string): Promise<Record<string, unknown>> 
   };
 }
 
-async function commitPostmortem(cwd: string, input: CommitPostmortemInput): Promise<Record<string, unknown>> {
-  const data = await buildIdentityAndProfile(cwd);
+async function commitPostmortem(cwd: string, input: CommitPostmortemInput & { workspace_path?: string }): Promise<Record<string, unknown>> {
+  const data = await buildIdentityAndProfile(cwd, input.workspace_path);
   const { store } = await ensureStore(data.agentRoot);
   try {
     store.upsertProject(data.identity);
@@ -678,9 +742,9 @@ async function commitPostmortem(cwd: string, input: CommitPostmortemInput): Prom
 
 async function readProjectMemory(
   cwd: string,
-  input: { type?: "incident" | "fact" | "decision"; limit: number },
+  input: { type?: "incident" | "fact" | "decision"; limit: number; workspace_path?: string },
 ): Promise<Record<string, unknown>> {
-  const data = await buildIdentityAndProfile(cwd);
+  const data = await buildIdentityAndProfile(cwd, input.workspace_path);
   const { store } = await ensureStore(data.agentRoot);
   try {
     const records = store.readProjectMemory(data.identity.project_id, input.type, input.limit);
@@ -698,9 +762,9 @@ async function readProjectMemory(
 
 async function ingestTerminalError(
   cwd: string,
-  input: { raw_log: string; command_kind?: CommandKind; workspace?: string; files?: string[] },
+  input: { raw_log: string; command_kind?: CommandKind; workspace?: string; files?: string[]; workspace_path?: string },
 ): Promise<Record<string, unknown>> {
-  const data = await buildIdentityAndProfile(cwd);
+  const data = await buildIdentityAndProfile(cwd, input.workspace_path);
   const normalized = normalizeTerminalError(input.raw_log, {
     command_kind: input.command_kind ?? "unknown",
     workspace: input.workspace,
@@ -722,9 +786,9 @@ async function ingestTerminalError(
 
 export async function searchProjectExperience(
   cwd: string,
-  input: { query: string; filters?: SearchExperienceFilters; limit: number; mode: "auto" | "text" | "vector" | "hybrid" },
+  input: { query: string; filters?: SearchExperienceFilters; limit: number; mode: "auto" | "text" | "vector" | "hybrid"; workspace_path?: string },
 ): Promise<Record<string, unknown>> {
-  const data = await buildIdentityAndProfile(cwd);
+  const data = await buildIdentityAndProfile(cwd, input.workspace_path);
   const { store } = await ensureStore(data.agentRoot);
   const config = getEmbeddingConfig();
   const embeddingClient = getEmbeddingClient();
@@ -770,9 +834,9 @@ export async function searchProjectExperience(
 
 export async function indexReadyMemories(
   cwd: string,
-  input: { limit: number; rebuild: boolean },
+  input: { limit: number; rebuild: boolean; workspace_path?: string },
 ): Promise<Record<string, unknown>> {
-  const data = await buildIdentityAndProfile(cwd);
+  const data = await buildIdentityAndProfile(cwd, input.workspace_path);
   const { store } = await ensureStore(data.agentRoot);
   try {
     const vectorStatus = await getVectorStoreStatus();
@@ -881,9 +945,9 @@ function decompressSnapshot(compression: "gzip" | "brotli", blob: Buffer): strin
 
 async function applySearchReplacePatch(
   cwd: string,
-  input: { file_path: string; search_block: string; replace_block: string; task_run_id?: string },
+  input: { file_path: string; search_block: string; replace_block: string; task_run_id?: string; workspace_path?: string },
 ): Promise<Record<string, unknown>> {
-  const data = await buildIdentityAndProfile(cwd);
+  const data = await buildIdentityAndProfile(cwd, input.workspace_path);
   const { store } = await ensureStore(data.agentRoot);
   try {
     const safePath = resolveWorkspacePathSafely(data.workspaceRoot, input.file_path);
@@ -1004,8 +1068,8 @@ async function applySearchReplacePatch(
   }
 }
 
-async function restoreSnapshot(cwd: string, input: { snapshot_id: string }): Promise<Record<string, unknown>> {
-  const data = await buildIdentityAndProfile(cwd);
+async function restoreSnapshot(cwd: string, input: { snapshot_id: string; workspace_path?: string }): Promise<Record<string, unknown>> {
+  const data = await buildIdentityAndProfile(cwd, input.workspace_path);
   const { store } = await ensureStore(data.agentRoot);
   try {
     const snapshot = store.getSnapshotById(input.snapshot_id);
@@ -1047,9 +1111,9 @@ async function restoreSnapshot(cwd: string, input: { snapshot_id: string }): Pro
 
 async function startTaskRun(
   cwd: string,
-  input: { task_text: string; approval_budget?: Partial<TaskBudget> },
+  input: { task_text: string; approval_budget?: Partial<TaskBudget>; workspace_path?: string },
 ): Promise<Record<string, unknown>> {
-  const data = await buildIdentityAndProfile(cwd);
+  const data = await buildIdentityAndProfile(cwd, input.workspace_path);
   const { store } = await ensureStore(data.agentRoot);
   try {
     const budget = defaultTaskBudget(input.approval_budget);
@@ -1067,8 +1131,8 @@ async function startTaskRun(
   }
 }
 
-async function getTaskRun(cwd: string, input: { task_run_id: string }): Promise<Record<string, unknown>> {
-  const data = await buildIdentityAndProfile(cwd);
+async function getTaskRun(cwd: string, input: { task_run_id: string; workspace_path?: string }): Promise<Record<string, unknown>> {
+  const data = await buildIdentityAndProfile(cwd, input.workspace_path);
   const { store } = await ensureStore(data.agentRoot);
   try {
     const row = store.getTaskRunById(input.task_run_id);
@@ -1098,9 +1162,9 @@ async function getTaskRun(cwd: string, input: { task_run_id: string }): Promise<
 
 async function logAttempt(
   cwd: string,
-  input: { task_run_id: string; kind: "patch" | "command" | "reasoning" | "memory"; summary: string; success: boolean; metadata?: Record<string, unknown> },
+  input: { task_run_id: string; kind: "patch" | "command" | "reasoning" | "memory"; summary: string; success: boolean; metadata?: Record<string, unknown>; workspace_path?: string },
 ): Promise<Record<string, unknown>> {
-  const data = await buildIdentityAndProfile(cwd);
+  const data = await buildIdentityAndProfile(cwd, input.workspace_path);
   const { store } = await ensureStore(data.agentRoot);
   try {
     const row = store.getTaskRunById(input.task_run_id);
@@ -1124,9 +1188,9 @@ async function logAttempt(
 
 async function runProjectCommand(
   cwd: string,
-  input: { task_run_id: string; kind: "test" | "lint" | "build" | "typecheck" },
+  input: { task_run_id: string; kind: "test" | "lint" | "build" | "typecheck"; workspace_path?: string },
 ): Promise<Record<string, unknown>> {
-  const data = await buildIdentityAndProfile(cwd);
+  const data = await buildIdentityAndProfile(cwd, input.workspace_path);
   const { store } = await ensureStore(data.agentRoot);
   try {
     const taskRun = store.getTaskRunById(input.task_run_id);
@@ -1247,9 +1311,9 @@ async function runProjectCommand(
 
 async function createDebugSession(
   cwd: string,
-  input: { task_text: string; initial_context?: string; approval_budget?: Partial<TaskBudget> },
+  input: { task_text: string; initial_context?: string; approval_budget?: Partial<TaskBudget>; workspace_path?: string },
 ): Promise<Record<string, unknown>> {
-  const data = await buildIdentityAndProfile(cwd);
+  const data = await buildIdentityAndProfile(cwd, input.workspace_path);
   const { store } = await ensureStore(data.agentRoot);
   try {
     const budget = defaultTaskBudget(input.approval_budget);
@@ -1280,9 +1344,9 @@ async function createDebugSession(
 
 async function recordErrorObservation(
   cwd: string,
-  input: { task_run_id: string; raw_output: string; command_kind?: "test" | "lint" | "build" | "typecheck" | "manual"; context?: Record<string, unknown> },
+  input: { task_run_id: string; raw_output: string; command_kind?: "test" | "lint" | "build" | "typecheck" | "manual"; context?: Record<string, unknown>; workspace_path?: string },
 ): Promise<Record<string, unknown>> {
-  const data = await buildIdentityAndProfile(cwd);
+  const data = await buildIdentityAndProfile(cwd, input.workspace_path);
   const { store } = await ensureStore(data.agentRoot);
   try {
     const verified = verifyTaskRunForProject(store, input.task_run_id, data.identity.project_id);
@@ -1326,9 +1390,9 @@ async function recordErrorObservation(
 
 async function suggestNextActions(
   cwd: string,
-  input: { task_run_id: string; normalized_error?: Record<string, unknown>; query?: string; limit: number },
+  input: { task_run_id: string; normalized_error?: Record<string, unknown>; query?: string; limit: number; workspace_path?: string },
 ): Promise<Record<string, unknown>> {
-  const data = await buildIdentityAndProfile(cwd);
+  const data = await buildIdentityAndProfile(cwd, input.workspace_path);
   const { store } = await ensureStore(data.agentRoot);
   try {
     const verified = verifyTaskRunForProject(store, input.task_run_id, data.identity.project_id);
@@ -1378,9 +1442,10 @@ async function finalizeSuccessfulFix(
     toolchain?: string;
     workspace?: string;
     confidence: number;
+    workspace_path?: string;
   },
 ): Promise<Record<string, unknown>> {
-  const data = await buildIdentityAndProfile(cwd);
+  const data = await buildIdentityAndProfile(cwd, input.workspace_path);
   const { store } = await ensureStore(data.agentRoot);
   try {
     const verified = verifyTaskRunForProject(store, input.task_run_id, data.identity.project_id);
@@ -1429,9 +1494,9 @@ async function finalizeSuccessfulFix(
 
 async function failDebugSession(
   cwd: string,
-  input: { task_run_id: string; reason: string; summary?: string },
+  input: { task_run_id: string; reason: string; summary?: string; workspace_path?: string },
 ): Promise<Record<string, unknown>> {
-  const data = await buildIdentityAndProfile(cwd);
+  const data = await buildIdentityAndProfile(cwd, input.workspace_path);
   const { store } = await ensureStore(data.agentRoot);
   try {
     const verified = verifyTaskRunForProject(store, input.task_run_id, data.identity.project_id);
@@ -1458,9 +1523,9 @@ async function failDebugSession(
 
 export async function vectorizePendingMemories(
   cwd: string,
-  input: { limit: number; retry_failed: boolean },
+  input: { limit: number; retry_failed: boolean; workspace_path?: string },
 ): Promise<Record<string, unknown>> {
-  const data = await buildIdentityAndProfile(cwd);
+  const data = await buildIdentityAndProfile(cwd, input.workspace_path);
   const { store } = await ensureStore(data.agentRoot);
   const config = getEmbeddingConfig();
   const model = config.model;
@@ -1599,9 +1664,9 @@ export async function vectorizePendingMemories(
 
 export async function getVectorizationStatus(
   cwd: string,
-  _input: { limit?: number },
+  input: { limit?: number; workspace_path?: string },
 ): Promise<Record<string, unknown>> {
-  const data = await buildIdentityAndProfile(cwd);
+  const data = await buildIdentityAndProfile(cwd, input.workspace_path);
   const { store } = await ensureStore(data.agentRoot);
   const config = getEmbeddingConfig();
   const embeddingClient = getEmbeddingClient();
@@ -1936,21 +2001,24 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
 }));
 
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
-  if (request.params.name === "health_check") {
-    return {
-      content: [{ type: "text", text: JSON.stringify({ status: "ok", service: "project-memory-agent" }) }],
-    };
-  }
+  try {
+    if (request.params.name === "health_check") {
+      return {
+        content: [{ type: "text", text: JSON.stringify({ status: "ok", service: "project-memory-agent" }) }],
+      };
+    }
 
-  if (request.params.name === "bootstrap_project") {
-    const result = await bootstrapProject(process.cwd());
-    return { content: [{ type: "text", text: JSON.stringify(result) }] };
-  }
+    if (request.params.name === "bootstrap_project") {
+      const parsed = bootstrapProjectInputSchema.parse(request.params.arguments ?? {});
+      const result = await bootstrapProject(process.cwd(), parsed.workspace_path);
+      return { content: [{ type: "text", text: JSON.stringify(result) }] };
+    }
 
-  if (request.params.name === "get_project_profile") {
-    const result = await getProjectProfile(process.cwd());
-    return { content: [{ type: "text", text: JSON.stringify(result) }] };
-  }
+    if (request.params.name === "get_project_profile") {
+      const parsed = getProjectProfileInputSchema.parse(request.params.arguments ?? {});
+      const result = await getProjectProfile(process.cwd(), parsed.workspace_path);
+      return { content: [{ type: "text", text: JSON.stringify(result) }] };
+    }
 
   if (request.params.name === "read_project_memory") {
     const parsed = readProjectMemoryInputSchema.parse(request.params.arguments ?? {});
@@ -2060,7 +2128,25 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     return { content: [{ type: "text", text: JSON.stringify(result) }] };
   }
 
-  throw new Error(`Unknown tool: ${request.params.name}`);
+    throw new Error(`Unknown tool: ${request.params.name}`);
+  } catch (error: unknown) {
+    if (error instanceof WorkspacePathResolutionError) {
+      const body = {
+        ok: false,
+        reason: error.reason,
+        workspace_path: error.workspace_path,
+      };
+      return { content: [{ type: "text", text: JSON.stringify(body) }], isError: true };
+    }
+    if (error instanceof z.ZodError) {
+      return {
+        content: [{ type: "text", text: JSON.stringify({ ok: false, reason: "invalid_arguments", issues: error.issues }) }],
+        isError: true,
+      };
+    }
+    const message = error instanceof Error ? error.message : String(error);
+    return { content: [{ type: "text", text: JSON.stringify({ ok: false, reason: "internal_error", message }) }], isError: true };
+  }
 });
 
 export async function startMcpServer(): Promise<void> {
