@@ -233,13 +233,23 @@ async function runSearch() {
         <span>score: ${Number(r.score || 0).toFixed(2)}</span>
       </div>
       <p>${escapeHtml(r.content || "-")}</p>
+      <pre class="code small">${escapeHtml(JSON.stringify({ ranking_reasons: r.ranking_reasons || [], ranking_breakdown: r.ranking_breakdown || {} }, null, 2))}</pre>
       <pre class="code small">${escapeHtml(JSON.stringify(r.metadata || {}, null, 2))}</pre>
     </article>`,
     )
       .join("");
   if (warnings.length > 0) {
     ui.searchResults.innerHTML += `<article class="result-card"><div class="result-top"><span class="pill">cautions</span></div><pre class="code small">${escapeHtml(
-      JSON.stringify(warnings, null, 2),
+      JSON.stringify(
+        warnings.map((w) => ({
+          type: w.type,
+          summary: w.summary,
+          warning_score: w.warning_score,
+          warning_reasons: w.warning_reasons,
+        })),
+        null,
+        2,
+      ),
     )}</pre></article>`;
   }
 }

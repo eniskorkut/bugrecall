@@ -24,7 +24,14 @@ export async function runHybridSearch(params: HybridParams): Promise<{
   results: SearchResult[];
   note?: string;
 }> {
-  const textResults = params.store.searchProjectExperience(params.projectId, params.query, params.filters, params.limit);
+  const poolLimit = Math.max(params.limit, Math.min(50, params.limit * 4));
+  const textResults = params.store.searchProjectExperience(
+    params.projectId,
+    params.query,
+    params.filters,
+    poolLimit,
+    false,
+  );
   const initialStatus: VectorStoreStatus = { state: "unavailable", enabled: false, reason: "vector not requested" };
 
   if (params.mode === "text") {
@@ -55,7 +62,7 @@ export async function runHybridSearch(params: HybridParams): Promise<{
     };
   }
 
-  const vector = await searchVectors(params.projectRoot, params.projectId, params.queryVector, params.filters, params.limit);
+  const vector = await searchVectors(params.projectRoot, params.projectId, params.queryVector, params.filters, poolLimit);
   const vectorEnabled = vector.status.state === "available";
 
   if (!vectorEnabled) {
@@ -79,8 +86,7 @@ export async function runHybridSearch(params: HybridParams): Promise<{
 
   const vectorHydrated = hydrateVectorHits(params.store, params.projectId, vector.hits);
   if (params.mode === "vector") {
-    const ranked = vectorHydrated.sort(byScoreCreated).slice(0, params.limit);
-    params.store.markRecordsRetrieved(ranked.map((r) => r.id));
+    const ranked = vectorHydrated.sort(byScoreCreated).slice(0, poolLimit);
     return {
       mode_used: "vector",
       vector_search_enabled: true,
@@ -89,13 +95,12 @@ export async function runHybridSearch(params: HybridParams): Promise<{
     };
   }
 
-  const merged = mergeHybrid(vectorHydrated, textResults, params.limit);
-  params.store.markRecordsRetrieved(merged.map((r) => r.id));
+  const merged = mergeHybrid(vectorHydrated, textResults, poolLimit);
   return {
     mode_used: "hybrid",
     vector_search_enabled: true,
     vector_store_status: vector.status,
-    results: merged,
+    results: merged.slice(0, poolLimit),
   };
 }
 

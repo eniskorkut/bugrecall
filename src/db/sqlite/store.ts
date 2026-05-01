@@ -60,6 +60,7 @@ export type SearchExperienceFilters = {
   workspace?: string;
   toolchain?: string;
   language?: string;
+  framework?: string;
   error_class?: string;
   min_confidence?: number;
 };
@@ -419,6 +420,10 @@ export class SqliteStore {
           score += 2;
           reasons.push("language");
         }
+        if (filters.framework && metadata.framework === filters.framework) {
+          score += 2;
+          reasons.push("framework");
+        }
         if (filters.type && String(row.type) === filters.type) {
           score += 2;
           reasons.push("type");
@@ -453,6 +458,7 @@ export class SqliteStore {
         if (filters.workspace && row.metadata.workspace !== filters.workspace) return false;
         if (filters.toolchain && row.metadata.toolchain !== filters.toolchain) return false;
         if (filters.language && row.metadata.language !== filters.language) return false;
+        if (filters.framework && row.metadata.framework !== filters.framework) return false;
         if (filters.error_class && row.metadata.error_class !== filters.error_class) return false;
         if (queryTokens.length === 0) return true;
         return row.score > row.confidence * 0.5;

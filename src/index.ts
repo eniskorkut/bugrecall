@@ -15,6 +15,7 @@ import { getEmbeddingClient } from "./engine/embedding/embeddingClient.js";
 import { getEmbeddingConfig } from "./engine/embedding/config.js";
 import { clearVectorProject, getVectorStoreStatus, upsertVectors } from "./db/vector/lanceStore.js";
 import { runHybridSearch } from "./engine/retrieval/hybridSearch.js";
+import { rankSearchResults, rankWarnings, type RankingContext } from "./engine/retrieval/ranking.js";
 import {
   type CommitPostmortemInput,
   type ProjectIdentityRow,
@@ -90,6 +91,7 @@ const searchProjectExperienceInputSchema = z
         workspace: z.string().optional(),
         toolchain: z.string().optional(),
         language: z.string().optional(),
+        framework: z.string().optional(),
         error_class: z.string().optional(),
         min_confidence: z.number().min(0).max(1).optional(),
       })
@@ -972,6 +974,7 @@ export async function searchProjectExperience(
       linked_memory_found: false,
     };
     let linkedMemoryId: string | null = null;
+    let linkedSignatureHash: string | null = input.error_signature_hash ?? null;
     if (input.error_signature_id) {
       const sig = store.getErrorSignatureById(input.error_signature_id);
       if (sig && sig.project_id !== data.identity.project_id) {
@@ -980,54 +983,85 @@ export async function searchProjectExperience(
       if (sig) {
         signatureLookup.found = true;
         linkedMemoryId = sig.linked_memory_id;
+        linkedSignatureHash = sig.signature_hash;
       }
     } else if (input.error_signature_hash) {
       const sig = store.getErrorSignatureByHash(data.identity.project_id, input.error_signature_hash);
       if (sig) {
         signatureLookup.found = true;
         linkedMemoryId = sig.linked_memory_id;
+        linkedSignatureHash = sig.signature_hash;
       }
     }
     if (linkedMemoryId) signatureLookup.linked_memory_found = true;
+    const retrievalLevelBase =
+      hybrid.mode_used === "hybrid"
+        ? "hybrid"
+        : hybrid.mode_used === "vector"
+          ? "vector"
+          : hybrid.mode_used === "text"
+            ? "text"
+            : "fallback";
 
-    const hydratedResults = hybrid.results.map((row) => {
-      const summary = String((row.metadata?.summary as string | undefined) ?? row.summary ?? row.content ?? "").trim();
-      const whyRelevant = ["same_project", ...(String(row.reason ?? "").split(",").filter(Boolean).map((reason) => `match_${reason}`))];
-      const retrievalLevel =
-        linkedMemoryId && row.id === linkedMemoryId
-          ? "signature_linked_memory"
-          : hybrid.mode_used === "hybrid"
-            ? "hybrid"
-            : hybrid.mode_used === "vector"
-              ? "vector"
-              : hybrid.mode_used === "text"
-                ? "text"
-                : "fallback";
-      return {
-        ...row,
-        retrieval_level: retrievalLevel,
-        why_relevant: whyRelevant,
-        detail_available: true,
-        metadata_preview: {
-          error_class: row.metadata?.error_class ?? null,
-          toolchain: row.metadata?.toolchain ?? null,
-          language: row.metadata?.language ?? null,
-          workspace: row.metadata?.workspace ?? null,
-        },
-        content: detailLevel === "summary" ? (summary || row.content) : row.content,
-        summary: summary || row.content,
-        metadata: detailLevel === "summary" ? {} : row.metadata,
-      };
-    });
-    if (linkedMemoryId) {
-      const idx = hydratedResults.findIndex((row) => row.id === linkedMemoryId);
-      if (idx > 0) {
-        const [linked] = hydratedResults.splice(idx, 1);
-        linked.retrieval_level = "signature_linked_memory";
-        linked.why_relevant = ["same_project", "linked_verified_fix"];
-        hydratedResults.unshift(linked);
+    const candidates = hybrid.results
+      .map((row) => {
+        const summary = String((row.metadata?.summary as string | undefined) ?? row.summary ?? row.content ?? "").trim();
+        return {
+          ...row,
+          summary: summary || row.content,
+          retrieval_level: linkedMemoryId && row.id === linkedMemoryId ? "signature_linked_memory" : retrievalLevelBase,
+          detail_available: true,
+          metadata_preview: {
+            error_class: row.metadata?.error_class ?? null,
+            toolchain: row.metadata?.toolchain ?? null,
+            language: row.metadata?.language ?? null,
+            framework: row.metadata?.framework ?? null,
+            workspace: row.metadata?.workspace ?? null,
+          },
+        };
+      })
+      .filter((row) => row.type !== "rejected_fix" && row.type !== "project_preference");
+
+    if (linkedMemoryId && !candidates.some((row) => row.id === linkedMemoryId)) {
+      const linked = store.getMemoryRecordById(data.identity.project_id, linkedMemoryId);
+      if (linked && linked.type !== "rejected_fix" && linked.type !== "project_preference") {
+        candidates.unshift({
+          ...linked,
+          score: 1,
+          reason: "signature_linked_memory",
+          retrieval_level: "signature_linked_memory",
+          detail_available: true,
+          metadata_preview: {
+            error_class: linked.metadata?.error_class ?? null,
+            toolchain: linked.metadata?.toolchain ?? null,
+            language: linked.metadata?.language ?? null,
+            framework: linked.metadata?.framework ?? null,
+            workspace: linked.metadata?.workspace ?? null,
+          },
+        });
       }
     }
+
+    const context: RankingContext = {
+      query: input.query,
+      filters: input.filters as Record<string, unknown> | undefined,
+      project_id: data.identity.project_id,
+      workspace_relative_path: data.identity.workspace_relative_path,
+      requested_error_signature: signatureLookup.requested,
+      requested_error_signature_id: input.error_signature_id ?? null,
+      requested_error_signature_hash: linkedSignatureHash,
+      linked_memory_id: linkedMemoryId,
+      language:
+        input.filters?.language ??
+        (typeof data.profile.languages?.[0] === "string" ? data.profile.languages[0] : null) ??
+        null,
+      toolchain: input.filters?.toolchain ?? null,
+      framework: input.filters?.framework ?? null,
+      error_class: input.filters?.error_class ?? null,
+    };
+    const ranked = rankSearchResults({ context, results: candidates });
+    const topRanked = ranked.slice(0, input.limit);
+    store.markRecordsRetrieved(topRanked.map((row) => row.id));
     const corrections = store.listUserCorrections(
       data.identity.project_id,
       {
@@ -1046,6 +1080,7 @@ export async function searchProjectExperience(
         error_class: input.filters?.error_class,
       },
     );
+    const rankedWarnings = rankWarnings({ context, warnings });
     return {
       ok: true,
       tool: "search_project_experience",
@@ -1056,11 +1091,23 @@ export async function searchProjectExperience(
       vector_search_enabled: hybrid.vector_search_enabled,
       vector_store_status: hybrid.vector_store_status,
       note: hybrid.note,
-      count: hydratedResults.length,
+      count: topRanked.length,
       signature_lookup: signatureLookup,
-      results: hydratedResults,
+      results: topRanked.map((row) => ({
+        ...row,
+        detail_available: true,
+        metadata_preview: {
+          error_class: row.metadata?.error_class ?? null,
+          toolchain: row.metadata?.toolchain ?? null,
+          language: row.metadata?.language ?? null,
+          framework: row.metadata?.framework ?? null,
+          workspace: row.metadata?.workspace ?? null,
+        },
+        content: detailLevel === "summary" ? row.summary : row.content,
+        metadata: detailLevel === "summary" ? {} : row.metadata,
+      })),
       warnings: includeWarnings
-        ? warnings.map((warning) => ({
+        ? rankedWarnings.map((warning) => ({
             ...warning,
             summary: String(warning.future_rule ?? warning.preferred_pattern ?? warning.rejected_pattern ?? "").trim(),
             detail_available: true,
@@ -2360,6 +2407,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
               workspace: { type: "string" },
               toolchain: { type: "string" },
               language: { type: "string" },
+              framework: { type: "string" },
               error_class: { type: "string" },
               min_confidence: { type: "number", minimum: 0, maximum: 1 },
             },
