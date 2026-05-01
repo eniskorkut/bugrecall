@@ -1,0 +1,185 @@
+{
+  "name": "basic-debug-memory",
+  "description": "Basic retrieval ranking checks for verified fixes and rejected fix warnings.",
+  "workspace_path": "apps/web",
+  "mode": "text",
+  "detail_level": "summary",
+  "include_warnings": true,
+  "thresholds": {
+    "top1_accuracy": 0.75,
+    "top3_recall": 1.0,
+    "mrr": 0.8,
+    "warning_recall": 1.0,
+    "false_positive_count": 0
+  },
+  "seed": {
+    "verified_memories": [
+      {
+        "label": "next_hydration_fix",
+        "type": "incident",
+        "error_class": "nextjs_hydration_error",
+        "language": "typescript",
+        "framework": "nextjs",
+        "toolchain": "nextjs",
+        "summary": "Hydration mismatch caused by browser-only localStorage access during render. Fix by moving browser-only state behind client boundary or useEffect.",
+        "root_cause": "Browser-only state was read during server/client render mismatch.",
+        "fix_pattern": "Move localStorage access into useEffect or use a deterministic server render.",
+        "anti_patterns": [
+          "Do not suppress hydration warning as the primary fix."
+        ],
+        "confidence": 0.95
+      },
+      {
+        "label": "pytest_assertion_fix",
+        "type": "incident",
+        "error_class": "python_test_failure",
+        "language": "python",
+        "framework": "fastapi",
+        "toolchain": "pytest",
+        "summary": "Pytest assertion failed because endpoint returned the original number instead of square.",
+        "root_cause": "Business logic returned number instead of number * number.",
+        "fix_pattern": "Fix implementation logic instead of weakening assertion.",
+        "anti_patterns": [
+          "Do not change the test expectation when implementation is wrong."
+        ],
+        "confidence": 0.9
+      },
+      {
+        "label": "ts_prop_type_fix",
+        "type": "incident",
+        "error_class": "typescript_error",
+        "language": "typescript",
+        "framework": "nextjs",
+        "toolchain": "tsc",
+        "summary": "TS prop type mismatch fixed by updating shared prop interface instead of casting to any.",
+        "root_cause": "Component props and shared type definition drifted.",
+        "fix_pattern": "Update shared TypeScript interface and call sites consistently.",
+        "anti_patterns": [
+          "Do not use any cast to hide the mismatch."
+        ],
+        "confidence": 0.92
+      },
+      {
+        "label": "generic_react_fact",
+        "type": "fact",
+        "language": "typescript",
+        "framework": "react",
+        "toolchain": "node",
+        "summary": "React components should avoid side effects during render.",
+        "content": "General React fact. This should not outrank project-specific verified debug fixes.",
+        "confidence": 0.7
+      }
+    ],
+    "user_corrections": [
+      {
+        "label": "reject_suppress_hydration_warning",
+        "correction_type": "rejected_fix",
+        "context": "Agent suggested suppressHydrationWarning for hydration mismatch.",
+        "user_feedback": "Do not hide hydration mismatch in this project.",
+        "rejected_pattern": "suppressHydrationWarning",
+        "preferred_pattern": "client boundary or deterministic server render",
+        "future_rule": "Avoid suppressHydrationWarning as the primary fix for hydration mismatch.",
+        "applies_to": {
+          "language": "typescript",
+          "framework": "nextjs",
+          "toolchain": "nextjs",
+          "error_class": "nextjs_hydration_error"
+        },
+        "confidence": 0.95
+      },
+      {
+        "label": "reject_any_cast",
+        "correction_type": "rejected_fix",
+        "context": "Agent suggested casting a TypeScript value to any.",
+        "user_feedback": "Do not use any to bypass type errors.",
+        "rejected_pattern": "as any",
+        "preferred_pattern": "fix the actual shared type",
+        "future_rule": "Avoid any casts for TypeScript mismatch. Fix the type definition or call site.",
+        "applies_to": {
+          "language": "typescript",
+          "framework": "nextjs",
+          "toolchain": "tsc",
+          "error_class": "typescript_error"
+        },
+        "confidence": 0.95
+      }
+    ]
+  },
+  "cases": [
+    {
+      "name": "next hydration localStorage retrieves verified fix",
+      "query": "Next.js hydration mismatch localStorage text content did not match server rendered html",
+      "filters": {
+        "language": "typescript",
+        "framework": "nextjs",
+        "toolchain": "nextjs",
+        "error_class": "nextjs_hydration_error"
+      },
+      "expected_top_label": "next_hydration_fix",
+      "expected_top3_labels": [
+        "next_hydration_fix"
+      ],
+      "expected_warning_labels": [
+        "reject_suppress_hydration_warning"
+      ],
+      "must_not_top3_labels": [
+        "pytest_assertion_fix"
+      ]
+    },
+    {
+      "name": "pytest assertion retrieves python fix",
+      "query": "pytest assertion failed endpoint returned original number instead of square",
+      "filters": {
+        "language": "python",
+        "framework": "fastapi",
+        "toolchain": "pytest",
+        "error_class": "python_test_failure"
+      },
+      "expected_top_label": "pytest_assertion_fix",
+      "expected_top3_labels": [
+        "pytest_assertion_fix"
+      ],
+      "must_not_top3_labels": [
+        "next_hydration_fix",
+        "ts_prop_type_fix"
+      ]
+    },
+    {
+      "name": "typescript mismatch avoids any cast warning",
+      "query": "TypeScript prop type mismatch should we cast as any",
+      "filters": {
+        "language": "typescript",
+        "framework": "nextjs",
+        "toolchain": "tsc",
+        "error_class": "typescript_error"
+      },
+      "expected_top_label": "ts_prop_type_fix",
+      "expected_top3_labels": [
+        "ts_prop_type_fix"
+      ],
+      "expected_warning_labels": [
+        "reject_any_cast"
+      ],
+      "must_not_top3_labels": [
+        "pytest_assertion_fix"
+      ]
+    },
+    {
+      "name": "metadata match beats generic react fact",
+      "query": "hydration mismatch during render browser state",
+      "filters": {
+        "language": "typescript",
+        "framework": "nextjs",
+        "toolchain": "nextjs",
+        "error_class": "nextjs_hydration_error"
+      },
+      "expected_top_label": "next_hydration_fix",
+      "expected_top3_labels": [
+        "next_hydration_fix"
+      ],
+      "must_not_top1_labels": [
+        "generic_react_fact"
+      ]
+    }
+  ]
+}
