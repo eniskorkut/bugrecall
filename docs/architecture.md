@@ -28,7 +28,7 @@ Bugrecall architecture is local-first and MCP-driven.
 ## Embeddings and vectors (optional)
 
 - Local embedding worker (optional)
-- Optional LanceDB vector index
+- Optional LanceDB vector index (external/manual install, not bundled in MVP package install)
 - Graceful fallback to SQLite text retrieval
 
 ## Safety controls

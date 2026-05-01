@@ -28,6 +28,9 @@ npm pack --dry-run --json
 ```
 
 Confirm package contents exclude local artifacts (for example `.agent`, `*.db`, `.env`, `node_modules`).
+MVP note:
+- `@lancedb/lancedb` is not bundled as an install dependency.
+- LanceDB support remains runtime-optional through dynamic import; fallback mode must continue working without it.
 
 CI should run at minimum:
 - `phase13d:check`

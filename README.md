@@ -34,7 +34,7 @@ Bugrecall is not a general memory assistant. It is a project/workspace-scoped de
 - Dashboard on `http://127.0.0.1:1453`.
 - SQLite source-of-truth memory store.
 - Optional local embeddings.
-- Optional LanceDB vector index.
+- Optional LanceDB vector index (not bundled in MVP install).
 - Terminal/test/type/syntax error normalization.
 - Error signatures + recurring errors.
 - Debug sessions and structured workflow tools.
@@ -198,6 +198,10 @@ More: [docs/local-data.md](docs/local-data.md)
 - `BUGRECALL_DASHBOARD_ALLOW_REMOTE=1` to allow non-local host binding
 
 First model load may be slow. Search still works with SQLite text fallback.
+
+LanceDB note:
+- MVP install does not bundle `@lancedb/lancedb`.
+- If you want experimental local vector index support, install it manually in your environment.
 
 ## Evaluation
 
