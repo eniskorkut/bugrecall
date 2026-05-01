@@ -3,7 +3,7 @@
     "bugrecall": {
       "command": "node",
       "args": [
-        "/absolute/path/to/bugrecall/project-memory-agent/bin/pma.js"
+        "/absolute/path/to/bugrecall/bin/pma.js"
       ]
     }
   }

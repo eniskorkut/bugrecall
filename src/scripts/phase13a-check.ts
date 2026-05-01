@@ -21,6 +21,7 @@ function main(): void {
   const clientsPath = path.join(repoRoot, "docs", "mcp-clients.md");
   const localDataPath = path.join(repoRoot, "docs", "local-data.md");
   const workflowsPath = path.join(repoRoot, "docs", "tool-workflows.md");
+  const architecturePath = path.join(repoRoot, "docs", "architecture.md");
   const genericConfigPath = path.join(repoRoot, "examples", "mcp-config.generic.json");
   const promptsPath = path.join(repoRoot, "examples", "prompts.md");
   const doctorPath = path.join(repoRoot, "src", "scripts", "doctor.ts");
@@ -31,20 +32,47 @@ function main(): void {
   assert(!readme.includes("No memory implementation yet"), "README still contains scaffold text");
   assert(readme.includes("Bugrecall"), "README does not mention Bugrecall");
   assert(readme.includes("127.0.0.1:1453"), "README missing dashboard URL");
+  assert(!readme.includes("/Users/"), "README contains local absolute /Users path");
+  assert(!readme.includes("project-memory-agent/bin/pma.js"), "README still contains nested project-memory-agent/bin path");
 
   assert(existsSync(dogfoodPath), "docs/dogfood.md missing");
   assert(existsSync(clientsPath), "docs/mcp-clients.md missing");
   assert(existsSync(localDataPath), "docs/local-data.md missing");
   assert(existsSync(workflowsPath), "docs/tool-workflows.md missing");
+  assert(existsSync(architecturePath), "docs/architecture.md missing");
   assert(existsSync(promptsPath), "examples/prompts.md missing");
   assert(existsSync(doctorPath), "src/scripts/doctor.ts missing");
+  const docsContent = [
+    readFileSync(dogfoodPath, "utf8"),
+    readFileSync(clientsPath, "utf8"),
+    readFileSync(localDataPath, "utf8"),
+    readFileSync(workflowsPath, "utf8"),
+    readFileSync(architecturePath, "utf8"),
+  ].join("\n");
+  assert(!docsContent.includes("/Users/"), "docs contain local absolute /Users path");
 
   assert(existsSync(genericConfigPath), "examples/mcp-config.generic.json missing");
-  JSON.parse(readFileSync(genericConfigPath, "utf8"));
+  const genericConfig = JSON.parse(readFileSync(genericConfigPath, "utf8")) as {
+    mcpServers?: { bugrecall?: { args?: string[] } };
+  };
+  const args = genericConfig.mcpServers?.bugrecall?.args ?? [];
+  assert(args.includes("/absolute/path/to/bugrecall/bin/pma.js"), "generic MCP example path is not /absolute/path/to/bugrecall/bin/pma.js");
+  const prompts = readFileSync(promptsPath, "utf8");
+  assert(!prompts.includes("/Users/"), "examples/prompts.md contains local absolute /Users path");
 
-  const pkg = JSON.parse(readFileSync(pkgPath, "utf8")) as { scripts?: Record<string, string> };
+  const pkg = JSON.parse(readFileSync(pkgPath, "utf8")) as {
+    scripts?: Record<string, string>;
+    description?: string;
+    version?: string;
+  };
   assert(Boolean(pkg.scripts?.doctor), "package.json missing doctor script");
   assert(Boolean(pkg.scripts?.["phase13a:check"]), "package.json missing phase13a:check script");
+  const description = String(pkg.description ?? "").toLowerCase();
+  assert(description.includes("bugrecall") || description.includes("debug memory"), "package.json description not product-accurate");
+  const indexTs = readFileSync(path.join(repoRoot, "src", "index.ts"), "utf8");
+  const match = indexTs.match(/version:\s*"([^"]+)"/);
+  const serverVersion = match?.[1] ?? "";
+  assert(Boolean(pkg.version) && pkg.version === serverVersion, "package.json version does not match MCP server version");
 
   const doctorOutput = run("npm", ["run", "doctor"], repoRoot);
   assert(doctorOutput.includes("Bugrecall Doctor"), "doctor output missing header");

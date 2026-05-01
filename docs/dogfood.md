@@ -11,18 +11,18 @@ This guide helps you use Bugrecall in another local project.
 ## Setup
 
 1. Build Bugrecall:
-   - `cd /absolute/path/to/bugrecall/project-memory-agent`
+   - `cd /absolute/path/to/bugrecall`
    - `npm run build`
 2. Add MCP config in your coding client:
    - command: `node`
-   - args: `["/absolute/path/to/bugrecall/project-memory-agent/bin/pma.js"]`
+   - args: `["/absolute/path/to/bugrecall/bin/pma.js"]`
 3. Open target project in your coding tool.
 
 ## Recommended first dogfood scenario
 
 1. Choose a project with tests/typecheck.
 2. Start dashboard:
-   - `node /absolute/path/to/bugrecall/project-memory-agent/bin/pma.js dashboard`
+   - `node /absolute/path/to/bugrecall/bin/pma.js dashboard`
 3. Ask agent:
    - "Use Bugrecall to bootstrap this project. Then run typecheck/test through Bugrecall. If errors occur, ingest them, search memory, and only finalize a fix after the command passes."
 4. Intentionally record one correction:

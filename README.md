@@ -56,7 +56,7 @@ Bugrecall is not a general memory assistant. It is a project/workspace-scoped de
 
 ```bash
 git clone https://github.com/eniskorkut/bugrecall.git
-cd bugrecall/project-memory-agent
+cd bugrecall
 npm install
 npm run build
 npm run typecheck
@@ -101,7 +101,7 @@ In your target project directory:
 cd /path/to/my-other-project
 ```
 
-Then configure your MCP client to run Bugrecall from your Bugrecall clone path (`node /absolute/path/to/bugrecall/project-memory-agent/bin/pma.js`).
+Then configure your MCP client to run Bugrecall from your Bugrecall clone path (`node /absolute/path/to/bugrecall/bin/pma.js`).
 
 Bugrecall resolves identity from `cwd` plus optional `workspace_path`. In monorepos, pass `workspace_path` such as `apps/web` or `packages/api`.
 
@@ -134,8 +134,8 @@ Example prompts:
 ## MCP client config examples
 
 See:
-- [docs/mcp-clients.md](/Users/eniskorkut/Desktop/bugrecall/project-memory-agent/docs/mcp-clients.md)
-- [examples/mcp-config.generic.json](/Users/eniskorkut/Desktop/bugrecall/project-memory-agent/examples/mcp-config.generic.json)
+- [docs/mcp-clients.md](docs/mcp-clients.md)
+- [examples/mcp-config.generic.json](examples/mcp-config.generic.json)
 
 Generic template:
 
@@ -144,7 +144,7 @@ Generic template:
   "mcpServers": {
     "bugrecall": {
       "command": "node",
-      "args": ["/absolute/path/to/bugrecall/project-memory-agent/bin/pma.js"]
+      "args": ["/absolute/path/to/bugrecall/bin/pma.js"]
     }
   }
 }
@@ -162,7 +162,7 @@ Codex/Claude/Cursor config UIs and file paths vary by version. Use the same stdi
 - User corrections are local.
 - No cloud sync by default.
 
-More: [docs/local-data.md](/Users/eniskorkut/Desktop/bugrecall/project-memory-agent/docs/local-data.md)
+More: [docs/local-data.md](docs/local-data.md)
 
 ## Embeddings and env vars
 

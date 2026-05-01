@@ -3,7 +3,7 @@
 Bugrecall runs as stdio MCP server:
 
 - command: `node`
-- args: `["/absolute/path/to/bugrecall/project-memory-agent/bin/pma.js"]`
+- args: `["/absolute/path/to/bugrecall/bin/pma.js"]`
 
 ## Generic template
 
@@ -12,7 +12,7 @@ Bugrecall runs as stdio MCP server:
   "mcpServers": {
     "bugrecall": {
       "command": "node",
-      "args": ["/absolute/path/to/bugrecall/project-memory-agent/bin/pma.js"]
+      "args": ["/absolute/path/to/bugrecall/bin/pma.js"]
     }
   }
 }

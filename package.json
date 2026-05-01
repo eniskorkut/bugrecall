@@ -1,8 +1,8 @@
 {
   "name": "project-memory-agent",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
-  "description": "TypeScript MCP server scaffold for project memory agent",
+  "description": "Bugrecall: local-first debug memory MCP server for AI coding agents",
   "type": "module",
   "bin": {
     "pma": "./bin/pma.js"
