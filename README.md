@@ -152,6 +152,15 @@ Generic template:
 
 Codex/Claude/Cursor config UIs and file paths vary by version. Use the same stdio command and adapt to your client.
 
+## MCP client integration
+
+- [Generic MCP](docs/integrations/generic-mcp.md)
+- [Codex](docs/integrations/codex.md)
+- [Claude](docs/integrations/claude.md)
+- [Cursor](docs/integrations/cursor.md)
+- [Agent instructions](docs/integrations/agent-instructions.md)
+- [Troubleshooting](docs/integrations/troubleshooting.md)
+
 ## Local data and privacy
 
 - Data is local under `.agent/` at repo root.

@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "bugrecall": {
+      "command": "node",
+      "args": [
+        "/absolute/path/to/bugrecall/bin/pma.js"
+      ],
+      "env": {
+        "BUGRECALL_EMBEDDINGS": "false"
+      }
+    }
+  }
+}

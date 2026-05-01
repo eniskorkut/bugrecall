@@ -1,0 +1,1 @@
+Use Bugrecall with explicit `workspace_path` for every tool call in this monorepo task (example: `apps/web` or `packages/api`). Bootstrap that workspace first, search memory before patching, respect `rejected_fix` warnings, and finalize only after verification succeeds.
