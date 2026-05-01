@@ -162,6 +162,12 @@ Codex/Claude/Cursor config UIs and file paths vary by version. Use the same stdi
 - [Agent instructions](docs/integrations/agent-instructions.md)
 - [Troubleshooting](docs/integrations/troubleshooting.md)
 
+## Package status
+
+- Package is currently private (`"private": true`).
+- Use `npm run package:check` for release-readiness validation and npm pack dry-run checks.
+- See [CHANGELOG.md](CHANGELOG.md), [SECURITY.md](SECURITY.md), and [docs/release.md](docs/release.md).
+
 ## Local data and privacy
 
 - Data is local under `.agent/` at repo root.

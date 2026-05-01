@@ -3,10 +3,42 @@
   "version": "0.2.0",
   "private": true,
   "description": "Bugrecall: local-first debug memory MCP server for AI coding agents",
+  "license": "MIT",
   "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "keywords": [
+    "mcp",
+    "ai-agents",
+    "coding-agents",
+    "debug-memory",
+    "local-first",
+    "rag",
+    "developer-tools"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/eniskorkut/bugrecall.git"
+  },
+  "bugs": {
+    "url": "https://github.com/eniskorkut/bugrecall/issues"
+  },
+  "homepage": "https://github.com/eniskorkut/bugrecall#readme",
   "bin": {
     "pma": "./bin/pma.js"
   },
+  "files": [
+    "bin",
+    "dist",
+    "src/dashboard/static",
+    "examples",
+    "docs",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md",
+    "SECURITY.md"
+  ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "dev": "tsx watch src/index.ts",
@@ -37,7 +69,9 @@
     "doctor": "node dist/scripts/doctor.js",
     "phase13a:check": "node dist/scripts/phase13a-check.js",
     "phase13b:check": "node dist/scripts/phase13b-check.js",
-    "phase13c:check": "node dist/scripts/phase13c-check.js"
+    "phase13c:check": "node dist/scripts/phase13c-check.js",
+    "package:check": "node dist/scripts/package-check.js",
+    "phase13d:check": "node dist/scripts/phase13d-check.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.0",

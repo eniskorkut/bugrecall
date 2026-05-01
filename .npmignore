@@ -1,0 +1,12 @@
+.agent
+*.db
+*.sqlite
+*.sqlite3
+.DS_Store
+coverage
+.tmp
+temp
+.env
+.env.*
+*.log
+node_modules

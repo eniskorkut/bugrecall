@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-and-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Doctor
+        run: npm run doctor
+
+      - name: Phase 13A check
+        run: npm run phase13a:check
+
+      - name: Phase 13B check
+        run: npm run phase13b:check
+
+      - name: Phase 13C check
+        run: npm run phase13c:check
+
+      - name: Phase 12E check
+        run: npm run phase12e:check
+
+      - name: Retrieval eval
+        run: npm run eval:retrieval
+
+      - name: Package check
+        run: npm run package:check
