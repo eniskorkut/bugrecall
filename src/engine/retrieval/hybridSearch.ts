@@ -111,6 +111,7 @@ function hydrateVectorHits(store: SqliteStore, projectId: string, hits: VectorSe
       type: row.type,
       scope: row.scope,
       content: row.content,
+      summary: row.summary,
       metadata: row.metadata,
       confidence: row.confidence,
       status: row.status,

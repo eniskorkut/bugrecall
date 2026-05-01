@@ -62,7 +62,7 @@ const readProjectMemoryInputSchema = z
 const commitPostmortemInputSchema = z
   .object({
     ...workspacePathField,
-    type: z.enum(memoryTypeValues).default("incident"),
+    type: z.enum(["incident", "fact", "decision"]).default("incident"),
     scope: z.enum(["workspace-only", "project-only", "repo-family"]).default("workspace-only"),
     content: z.string().min(1),
     confidence: z.number().min(0).max(1).default(0.8),
@@ -96,6 +96,17 @@ const searchProjectExperienceInputSchema = z
       .optional(),
     limit: z.number().int().min(1).max(50).optional().default(5),
     mode: z.enum(["auto", "text", "vector", "hybrid"]).optional().default("auto"),
+    detail_level: z.enum(["summary", "full"]).optional().default("summary"),
+    include_warnings: z.boolean().optional().default(true),
+    error_signature_id: z.string().optional(),
+    error_signature_hash: z.string().optional(),
+  })
+  .strict();
+
+const getMemoryDetailInputSchema = z
+  .object({
+    ...workspacePathField,
+    memory_id: z.string().min(1),
   })
   .strict();
 
@@ -839,7 +850,10 @@ async function commitPostmortem(cwd: string, input: CommitPostmortemInput & { wo
   try {
     store.upsertProject(data.identity);
     store.upsertProjectProfile(data.identity.project_id, data.profile);
-    const inserted = store.insertMemoryRecord(data.identity.project_id, input);
+    const metadata = { ...input.metadata };
+    const summary = buildMemorySummaryForType(input.type, input.content, metadata);
+    if (summary) metadata.summary = summary;
+    const inserted = store.insertMemoryRecord(data.identity.project_id, { ...input, metadata, summary });
     return {
       ok: true,
       tool: "commit_postmortem",
@@ -912,7 +926,17 @@ async function ingestTerminalError(
 
 export async function searchProjectExperience(
   cwd: string,
-  input: { query: string; filters?: SearchExperienceFilters; limit: number; mode: "auto" | "text" | "vector" | "hybrid"; workspace_path?: string },
+  input: {
+    query: string;
+    filters?: SearchExperienceFilters;
+    limit: number;
+    mode: "auto" | "text" | "vector" | "hybrid";
+    workspace_path?: string;
+    detail_level?: "summary" | "full";
+    include_warnings?: boolean;
+    error_signature_id?: string;
+    error_signature_hash?: string;
+  },
 ): Promise<Record<string, unknown>> {
   const data = await buildIdentityAndProfile(cwd, input.workspace_path);
   const { store } = await ensureStore(data.agentRoot);
@@ -940,6 +964,70 @@ export async function searchProjectExperience(
       queryVector,
       store,
     });
+    const detailLevel = input.detail_level ?? "summary";
+    const includeWarnings = input.include_warnings ?? true;
+    const signatureLookup = {
+      requested: Boolean(input.error_signature_id || input.error_signature_hash),
+      found: false,
+      linked_memory_found: false,
+    };
+    let linkedMemoryId: string | null = null;
+    if (input.error_signature_id) {
+      const sig = store.getErrorSignatureById(input.error_signature_id);
+      if (sig && sig.project_id !== data.identity.project_id) {
+        return { ok: false, reason: "error_signature_project_mismatch", error_signature_id: input.error_signature_id };
+      }
+      if (sig) {
+        signatureLookup.found = true;
+        linkedMemoryId = sig.linked_memory_id;
+      }
+    } else if (input.error_signature_hash) {
+      const sig = store.getErrorSignatureByHash(data.identity.project_id, input.error_signature_hash);
+      if (sig) {
+        signatureLookup.found = true;
+        linkedMemoryId = sig.linked_memory_id;
+      }
+    }
+    if (linkedMemoryId) signatureLookup.linked_memory_found = true;
+
+    const hydratedResults = hybrid.results.map((row) => {
+      const summary = String((row.metadata?.summary as string | undefined) ?? row.summary ?? row.content ?? "").trim();
+      const whyRelevant = ["same_project", ...(String(row.reason ?? "").split(",").filter(Boolean).map((reason) => `match_${reason}`))];
+      const retrievalLevel =
+        linkedMemoryId && row.id === linkedMemoryId
+          ? "signature_linked_memory"
+          : hybrid.mode_used === "hybrid"
+            ? "hybrid"
+            : hybrid.mode_used === "vector"
+              ? "vector"
+              : hybrid.mode_used === "text"
+                ? "text"
+                : "fallback";
+      return {
+        ...row,
+        retrieval_level: retrievalLevel,
+        why_relevant: whyRelevant,
+        detail_available: true,
+        metadata_preview: {
+          error_class: row.metadata?.error_class ?? null,
+          toolchain: row.metadata?.toolchain ?? null,
+          language: row.metadata?.language ?? null,
+          workspace: row.metadata?.workspace ?? null,
+        },
+        content: detailLevel === "summary" ? (summary || row.content) : row.content,
+        summary: summary || row.content,
+        metadata: detailLevel === "summary" ? {} : row.metadata,
+      };
+    });
+    if (linkedMemoryId) {
+      const idx = hydratedResults.findIndex((row) => row.id === linkedMemoryId);
+      if (idx > 0) {
+        const [linked] = hydratedResults.splice(idx, 1);
+        linked.retrieval_level = "signature_linked_memory";
+        linked.why_relevant = ["same_project", "linked_verified_fix"];
+        hydratedResults.unshift(linked);
+      }
+    }
     const corrections = store.listUserCorrections(
       data.identity.project_id,
       {
@@ -968,9 +1056,16 @@ export async function searchProjectExperience(
       vector_search_enabled: hybrid.vector_search_enabled,
       vector_store_status: hybrid.vector_store_status,
       note: hybrid.note,
-      count: hybrid.results.length,
-      results: hybrid.results,
-      warnings,
+      count: hydratedResults.length,
+      signature_lookup: signatureLookup,
+      results: hydratedResults,
+      warnings: includeWarnings
+        ? warnings.map((warning) => ({
+            ...warning,
+            summary: String(warning.future_rule ?? warning.preferred_pattern ?? warning.rejected_pattern ?? "").trim(),
+            detail_available: true,
+          }))
+        : [],
     };
   } finally {
     store.close();
@@ -1001,12 +1096,21 @@ export async function recordUserCorrection(
       const sigByHash = store.getErrorSignatureByHash(data.identity.project_id, appliesTo.error_signature_hash);
       if (sigByHash) appliesTo.error_signature_id = sigByHash.id;
     }
-    const summary = `${input.future_rule} (${input.correction_type})`;
+    const summary = buildMemorySummaryForType(
+      input.correction_type,
+      input.user_feedback,
+      {
+        future_rule: input.future_rule,
+        rejected_pattern: input.rejected_pattern ?? null,
+        preferred_pattern: input.preferred_pattern ?? null,
+      },
+    );
     const inserted = store.insertMemoryRecord(data.identity.project_id, {
       type: input.correction_type,
       scope: "workspace-only",
-      content: summary,
+      content: input.user_feedback,
       confidence: input.confidence,
+      summary,
       metadata: {
         source: "user_correction",
         context: input.context,
@@ -1066,7 +1170,7 @@ export async function listUserCorrections(
         id: row.id,
         type: row.type,
         content: row.content,
-        summary: row.metadata.summary ?? row.content,
+        summary: row.summary || (row.metadata.summary as string | undefined) || row.content,
         rejected_pattern: row.metadata.rejected_pattern ?? null,
         preferred_pattern: row.metadata.preferred_pattern ?? null,
         future_rule: row.metadata.future_rule ?? row.content,
@@ -1077,6 +1181,47 @@ export async function listUserCorrections(
         last_retrieved_at: row.last_retrieved_at,
       })),
     };
+  } finally {
+    store.close();
+  }
+}
+
+export async function getMemoryDetail(
+  cwd: string,
+  input: z.infer<typeof getMemoryDetailInputSchema>,
+): Promise<Record<string, unknown>> {
+  const data = await buildIdentityAndProfile(cwd, input.workspace_path);
+  const { store } = await ensureStore(data.agentRoot);
+  try {
+    const row = store.getMemoryRecordById(data.identity.project_id, input.memory_id);
+    if (row) {
+      const linkedSignature = store.getErrorSignatureByLinkedMemoryId(data.identity.project_id, row.id);
+      return {
+        ok: true,
+        tool: "get_memory_detail",
+        project_id: data.identity.project_id,
+        workspace_relative_path: data.identity.workspace_relative_path,
+        memory: row,
+        linked_error_signature: linkedSignature
+          ? {
+              id: linkedSignature.id,
+              signature_hash: linkedSignature.signature_hash,
+              error_class: linkedSignature.error_class,
+              language: linkedSignature.language,
+              toolchain: linkedSignature.toolchain,
+              normalized_message: linkedSignature.normalized_message,
+              occurrence_count: linkedSignature.occurrence_count,
+              first_seen_at: linkedSignature.first_seen_at,
+              last_seen_at: linkedSignature.last_seen_at,
+            }
+          : undefined,
+      };
+    }
+    const anyProject = store.getMemoryRecordByIdAnyProject(input.memory_id);
+    if (anyProject && anyProject.project_id !== data.identity.project_id) {
+      return { ok: false, reason: "memory_project_mismatch", memory_id: input.memory_id };
+    }
+    return { ok: false, reason: "memory_not_found", memory_id: input.memory_id };
   } finally {
     store.close();
   }
@@ -1167,6 +1312,44 @@ function resolveWorkspacePathSafely(workspaceRoot: string, filePath: string): { 
 
 function normalizeLower(value: unknown): string {
   return String(value ?? "").trim().toLowerCase();
+}
+
+function shortText(value: unknown, max = 280): string {
+  const clean = String(value ?? "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (clean.length <= max) return clean;
+  return `${clean.slice(0, max - 1).trimEnd()}…`;
+}
+
+function buildMemorySummaryForType(
+  type: "incident" | "fact" | "decision" | "rejected_fix" | "project_preference",
+  content: string,
+  metadata: Record<string, unknown>,
+): string {
+  if (type === "rejected_fix") {
+    const rejected = shortText(metadata.rejected_pattern);
+    const preferred = shortText(metadata.preferred_pattern);
+    const rule = shortText(metadata.future_rule || metadata.summary || content);
+    const parts = [rule];
+    if (rejected) parts.push(`Reject: ${rejected}`);
+    if (preferred) parts.push(`Prefer: ${preferred}`);
+    return shortText(parts.join(" "));
+  }
+  if (type === "project_preference") {
+    return shortText(metadata.future_rule || metadata.summary || content);
+  }
+  const errorClass = shortText(metadata.error_class);
+  const rootCause = shortText(metadata.root_cause);
+  const fixPattern = shortText(metadata.fix_pattern);
+  const antiPattern = shortText(Array.isArray(metadata.anti_patterns) ? metadata.anti_patterns.join(", ") : metadata.anti_patterns);
+  const parts: string[] = [];
+  if (errorClass) parts.push(`[${errorClass}]`);
+  if (rootCause) parts.push(`Root cause: ${rootCause}`);
+  if (fixPattern) parts.push(`Fix: ${fixPattern}`);
+  if (antiPattern) parts.push(`Avoid: ${antiPattern}`);
+  if (parts.length === 0) return shortText(metadata.summary || content);
+  return shortText(parts.join(" "));
 }
 
 function buildCorrectionWarnings(
@@ -1819,11 +2002,13 @@ async function finalizeSuccessfulFix(
       linked_error_signature_id: linkedSignature?.id ?? null,
       linked_error_signature_hash: linkedSignature?.signature_hash ?? null,
     };
+    const memorySummary = buildMemorySummaryForType("incident", input.summary, metadata);
     const inserted = store.insertMemoryRecord(data.identity.project_id, {
       type: "incident",
       scope: "workspace-only",
       content: input.summary,
       confidence: input.confidence,
+      summary: memorySummary,
       metadata,
     });
     store.updateTaskRunStatus(input.task_run_id, "succeeded", input.summary);
@@ -2128,7 +2313,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
       inputSchema: {
         type: "object",
         properties: {
-          type: { type: "string", enum: [...memoryTypeValues], default: "incident" },
+          type: { type: "string", enum: ["incident", "fact", "decision"], default: "incident" },
           scope: { type: "string", enum: ["workspace-only", "project-only", "repo-family"], default: "workspace-only" },
           content: { type: "string" },
           confidence: { type: "number", minimum: 0, maximum: 1, default: 0.8 },
@@ -2164,6 +2349,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           workspace_path: { type: "string" },
           query: { type: "string" },
           mode: { type: "string", enum: ["auto", "text", "vector", "hybrid"], default: "auto" },
+          detail_level: { type: "string", enum: ["summary", "full"], default: "summary" },
+          include_warnings: { type: "boolean", default: true },
+          error_signature_id: { type: "string" },
+          error_signature_hash: { type: "string" },
           filters: {
             type: "object",
             properties: {
@@ -2179,6 +2368,19 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           limit: { type: "number", minimum: 1, maximum: 50, default: 5 },
         },
         required: ["query"],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "get_memory_detail",
+      description: "Fetch full memory content and linked signature details by memory id.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          workspace_path: { type: "string" },
+          memory_id: { type: "string" },
+        },
+        required: ["memory_id"],
         additionalProperties: false,
       },
     },
@@ -2500,6 +2702,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const parsed = searchProjectExperienceInputSchema.parse(request.params.arguments ?? {});
     const result = await searchProjectExperience(process.cwd(), parsed);
     return { content: [{ type: "text", text: JSON.stringify(result) }] };
+  }
+
+  if (request.params.name === "get_memory_detail") {
+    const parsed = getMemoryDetailInputSchema.parse(request.params.arguments ?? {});
+    const result = await getMemoryDetail(process.cwd(), parsed);
+    return { content: [{ type: "text", text: JSON.stringify(result) }], isError: result.ok === false };
   }
 
   if (request.params.name === "get_recurring_errors") {

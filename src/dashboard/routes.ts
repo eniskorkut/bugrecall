@@ -1,6 +1,16 @@
 import { getEmbeddingClient } from "../engine/embedding/embeddingClient.js";
 import { getVectorStoreStatus } from "../db/vector/lanceStore.js";
-import { buildIdentityAndProfile, ensureStore, getRecurringErrors, getVectorizationStatus, indexReadyMemories, listUserCorrections, searchProjectExperience, vectorizePendingMemories } from "../index.js";
+import {
+  buildIdentityAndProfile,
+  ensureStore,
+  getMemoryDetail,
+  getRecurringErrors,
+  getVectorizationStatus,
+  indexReadyMemories,
+  listUserCorrections,
+  searchProjectExperience,
+  vectorizePendingMemories,
+} from "../index.js";
 
 type ApiResult = {
   status: number;
@@ -80,6 +90,7 @@ export async function handleApiRequest(cwd: string, method: string, pathname: st
       const records = store.listMemoryRecords(data.identity.project_id, filters, limit).map((row) => ({
         id: row.id,
         type: row.type,
+        summary: row.summary,
         status: row.status,
         confidence: row.confidence,
         language: row.metadata.language ?? null,
@@ -93,20 +104,21 @@ export async function handleApiRequest(cwd: string, method: string, pathname: st
 
     if (pathname.startsWith("/api/memories/") && method === "GET") {
       const id = decodeURIComponent(pathname.replace("/api/memories/", ""));
-      const record = store.getMemoryRecordById(data.identity.project_id, id);
-      if (!record) return { status: 404, body: { ok: false, reason: "not_found" } };
+      const detail = await getMemoryDetail(cwd, { workspace_path: workspacePath, memory_id: id });
+      if (!detail.ok) return { status: 404, body: detail };
       return {
         status: 200,
         body: {
-          ok: true,
+          ...detail,
           record: {
-            ...record,
-            symptoms: record.metadata.symptoms ?? null,
-            root_cause: record.metadata.root_cause ?? null,
-            fix_pattern: record.metadata.fix_pattern ?? null,
-            anti_patterns: record.metadata.anti_patterns ?? null,
-            verification_steps: record.metadata.verification_steps ?? null,
-          },
+            ...(detail.memory as Record<string, unknown>),
+            symptoms: ((detail.memory as Record<string, unknown>).metadata as Record<string, unknown>)?.symptoms ?? null,
+            root_cause: ((detail.memory as Record<string, unknown>).metadata as Record<string, unknown>)?.root_cause ?? null,
+            fix_pattern: ((detail.memory as Record<string, unknown>).metadata as Record<string, unknown>)?.fix_pattern ?? null,
+            anti_patterns: ((detail.memory as Record<string, unknown>).metadata as Record<string, unknown>)?.anti_patterns ?? null,
+            verification_steps:
+              ((detail.memory as Record<string, unknown>).metadata as Record<string, unknown>)?.verification_steps ?? null,
+          } as Record<string, unknown>,
         },
       };
     }
@@ -116,7 +128,17 @@ export async function handleApiRequest(cwd: string, method: string, pathname: st
       if (!q.trim()) return { status: 400, body: { ok: false, reason: "missing_query" } };
       const mode = parseMode(url.searchParams.get("mode"));
       const limit = parseLimit(url.searchParams.get("limit"), 10, 1, 50);
-      const result = await searchProjectExperience(cwd, { query: q, mode, limit, filters: {}, workspace_path: workspacePath });
+      const detail_level = url.searchParams.get("detail_level") === "full" ? "full" : "summary";
+      const include_warnings = url.searchParams.get("include_warnings") !== "false";
+      const result = await searchProjectExperience(cwd, {
+        query: q,
+        mode,
+        limit,
+        filters: {},
+        workspace_path: workspacePath,
+        detail_level,
+        include_warnings,
+      });
       return { status: 200, body: result };
     }
 

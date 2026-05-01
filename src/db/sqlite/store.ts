@@ -36,6 +36,7 @@ export type CommitPostmortemInput = {
   content: string;
   confidence: number;
   metadata: Record<string, unknown>;
+  summary?: string;
 };
 
 export type MemoryRecord = {
@@ -44,6 +45,7 @@ export type MemoryRecord = {
   type: string;
   scope: string;
   content: string;
+  summary: string;
   metadata: Record<string, unknown>;
   status: string;
   confidence: number;
@@ -67,6 +69,7 @@ export type SearchExperienceResult = {
   type: string;
   scope: string;
   content: string;
+  summary: string;
   metadata: Record<string, unknown>;
   confidence: number;
   status: string;
@@ -279,14 +282,15 @@ export class SqliteStore {
   insertMemoryRecord(projectId: string, input: CommitPostmortemInput): { id: string; status: string } {
     const id = randomUUID();
     const status = "pending_vectorization";
+    const summary = buildMemorySummary(input.content, input.metadata, input.summary);
 
     this.db
       .prepare(
         `
       INSERT INTO memory_records (
-        id, project_id, type, scope, content, metadata_json, status, confidence
+        id, project_id, type, scope, content, summary, metadata_json, status, confidence
       ) VALUES (
-        @id, @project_id, @type, @scope, @content, @metadata_json, @status, @confidence
+        @id, @project_id, @type, @scope, @content, @summary, @metadata_json, @status, @confidence
       )
     `,
       )
@@ -296,6 +300,7 @@ export class SqliteStore {
         type: input.type,
         scope: input.scope,
         content: input.content,
+        summary,
         metadata_json: JSON.stringify(input.metadata),
         status,
         confidence: input.confidence,
@@ -312,7 +317,7 @@ export class SqliteStore {
       rows = this.db
         .prepare(
           `
-        SELECT id, project_id, type, scope, content, metadata_json, status, confidence, created_at, updated_at, last_retrieved_at, retrieval_hits
+        SELECT id, project_id, type, scope, content, summary, metadata_json, status, confidence, created_at, updated_at, last_retrieved_at, retrieval_hits
         FROM memory_records
         WHERE project_id = ? AND type = ? AND confidence >= 0.7
         ORDER BY datetime(created_at) DESC
@@ -324,7 +329,7 @@ export class SqliteStore {
       rows = this.db
         .prepare(
           `
-        SELECT id, project_id, type, scope, content, metadata_json, status, confidence, created_at, updated_at, last_retrieved_at, retrieval_hits
+        SELECT id, project_id, type, scope, content, summary, metadata_json, status, confidence, created_at, updated_at, last_retrieved_at, retrieval_hits
         FROM memory_records
         WHERE project_id = ? AND confidence >= 0.7
         ORDER BY datetime(created_at) DESC
@@ -352,6 +357,7 @@ export class SqliteStore {
       type: String(row.type),
       scope: String(row.scope),
       content: String(row.content),
+      summary: String(row.summary ?? ""),
       metadata: safeJsonParse(String(row.metadata_json), {}),
       status: String(row.status),
       confidence: Number(row.confidence),
@@ -374,7 +380,7 @@ export class SqliteStore {
     const rows = this.db
       .prepare(
         `
-      SELECT id, type, scope, content, metadata_json, confidence, status, created_at, retrieval_hits
+      SELECT id, type, scope, content, summary, metadata_json, confidence, status, created_at, retrieval_hits
       FROM memory_records
       WHERE project_id = ? AND confidence >= ?
       ORDER BY datetime(created_at) DESC
@@ -432,6 +438,7 @@ export class SqliteStore {
           type: String(row.type),
           scope: String(row.scope),
           content,
+          summary: String(row.summary ?? ""),
           metadata,
           confidence: Number(row.confidence ?? 0),
           status: String(row.status),
@@ -467,7 +474,7 @@ export class SqliteStore {
     const rows = this.db
       .prepare(
         `
-      SELECT id, project_id, type, scope, content, metadata_json, status, confidence, created_at, updated_at, last_retrieved_at, retrieval_hits
+      SELECT id, project_id, type, scope, content, summary, metadata_json, status, confidence, created_at, updated_at, last_retrieved_at, retrieval_hits
       FROM memory_records
       WHERE status = 'pending_vectorization'
       ORDER BY datetime(created_at) ASC
@@ -481,6 +488,7 @@ export class SqliteStore {
       type: String(row.type),
       scope: String(row.scope),
       content: String(row.content),
+      summary: String(row.summary ?? ""),
       metadata: safeJsonParse(String(row.metadata_json), {}),
       status: String(row.status),
       confidence: Number(row.confidence),
@@ -502,7 +510,7 @@ export class SqliteStore {
     const rows = this.db
       .prepare(
         `
-      SELECT id, project_id, type, scope, content, metadata_json, status, confidence, created_at, updated_at, last_retrieved_at, retrieval_hits
+      SELECT id, project_id, type, scope, content, summary, metadata_json, status, confidence, created_at, updated_at, last_retrieved_at, retrieval_hits
       FROM memory_records
       WHERE project_id = ? AND status IN (${placeholders})
       ORDER BY datetime(created_at) ASC
@@ -521,6 +529,7 @@ export class SqliteStore {
         type: String(row.type),
         scope: String(row.scope),
         content,
+        summary: String(row.summary ?? ""),
         metadata,
         status: String(row.status),
         confidence: Number(row.confidence),
@@ -718,7 +727,7 @@ export class SqliteStore {
     const rows = this.db
       .prepare(
         `
-      SELECT id, project_id, type, scope, content, metadata_json, status, confidence, created_at, updated_at, last_retrieved_at, retrieval_hits
+      SELECT id, project_id, type, scope, content, summary, metadata_json, status, confidence, created_at, updated_at, last_retrieved_at, retrieval_hits
       FROM memory_records
       WHERE project_id = ? AND id IN (${placeholders})
     `,
@@ -730,6 +739,7 @@ export class SqliteStore {
       type: String(row.type),
       scope: String(row.scope),
       content: String(row.content),
+      summary: String(row.summary ?? ""),
       metadata: safeJsonParse(String(row.metadata_json), {}),
       status: String(row.status),
       confidence: Number(row.confidence),
@@ -991,7 +1001,7 @@ export class SqliteStore {
     const rows = this.db
       .prepare(
         `
-      SELECT id, project_id, type, scope, content, metadata_json, status, confidence, created_at, updated_at, last_retrieved_at, retrieval_hits
+      SELECT id, project_id, type, scope, content, summary, metadata_json, status, confidence, created_at, updated_at, last_retrieved_at, retrieval_hits
       FROM memory_records
       WHERE project_id = ?
       ORDER BY datetime(created_at) DESC
@@ -1007,6 +1017,7 @@ export class SqliteStore {
         type: String(row.type),
         scope: String(row.scope),
         content: String(row.content),
+        summary: String(row.summary ?? ""),
         metadata: safeJsonParse<Record<string, unknown>>(String(row.metadata_json), {}),
         status: String(row.status),
         confidence: Number(row.confidence),
@@ -1027,7 +1038,7 @@ export class SqliteStore {
     const row = this.db
       .prepare(
         `
-      SELECT id, project_id, type, scope, content, metadata_json, status, confidence, created_at, updated_at, last_retrieved_at, retrieval_hits
+      SELECT id, project_id, type, scope, content, summary, metadata_json, status, confidence, created_at, updated_at, last_retrieved_at, retrieval_hits
       FROM memory_records
       WHERE project_id = ? AND id = ?
     `,
@@ -1040,6 +1051,35 @@ export class SqliteStore {
       type: String(row.type),
       scope: String(row.scope),
       content: String(row.content),
+      summary: String(row.summary ?? ""),
+      metadata: safeJsonParse(String(row.metadata_json), {}),
+      status: String(row.status),
+      confidence: Number(row.confidence),
+      created_at: String(row.created_at),
+      updated_at: String(row.updated_at),
+      last_retrieved_at: row.last_retrieved_at ? String(row.last_retrieved_at) : null,
+      retrieval_hits: Number(row.retrieval_hits ?? 0),
+    };
+  }
+
+  getMemoryRecordByIdAnyProject(id: string): MemoryRecord | null {
+    const row = this.db
+      .prepare(
+        `
+      SELECT id, project_id, type, scope, content, summary, metadata_json, status, confidence, created_at, updated_at, last_retrieved_at, retrieval_hits
+      FROM memory_records
+      WHERE id = ?
+    `,
+      )
+      .get(id) as Record<string, unknown> | undefined;
+    if (!row) return null;
+    return {
+      id: String(row.id),
+      project_id: String(row.project_id),
+      type: String(row.type),
+      scope: String(row.scope),
+      content: String(row.content),
+      summary: String(row.summary ?? ""),
       metadata: safeJsonParse(String(row.metadata_json), {}),
       status: String(row.status),
       confidence: Number(row.confidence),
@@ -1133,7 +1173,7 @@ export class SqliteStore {
     const rows = this.db
       .prepare(
         `
-      SELECT id, project_id, type, scope, content, metadata_json, status, confidence, created_at, updated_at, last_retrieved_at, retrieval_hits
+      SELECT id, project_id, type, scope, content, summary, metadata_json, status, confidence, created_at, updated_at, last_retrieved_at, retrieval_hits
       FROM memory_records
       WHERE project_id = ? AND type IN ('rejected_fix', 'project_preference')
       ORDER BY datetime(created_at) DESC
@@ -1148,6 +1188,7 @@ export class SqliteStore {
       type: String(row.type),
       scope: String(row.scope),
       content: String(row.content),
+      summary: String(row.summary ?? ""),
       metadata: safeJsonParse<Record<string, unknown>>(String(row.metadata_json), {}),
       status: String(row.status),
       confidence: Number(row.confidence),
@@ -1359,6 +1400,23 @@ export class SqliteStore {
     return row ? this.mapErrorSignatureRow(row) : null;
   }
 
+  getErrorSignatureByLinkedMemoryId(projectId: string, memoryId: string): ErrorSignatureRow | null {
+    const row = this.db
+      .prepare(
+        `
+      SELECT
+        id, project_id, workspace_relative_path, signature_hash, language, toolchain, error_class,
+        normalized_message, top_frame_symbol, file_hint, command_kind, occurrence_count,
+        first_seen_at, last_seen_at, linked_memory_id, last_observation_json, created_at, updated_at
+      FROM error_signatures
+      WHERE project_id = ? AND linked_memory_id = ?
+      LIMIT 1
+    `,
+      )
+      .get(projectId, memoryId) as Record<string, unknown> | undefined;
+    return row ? this.mapErrorSignatureRow(row) : null;
+  }
+
   linkErrorSignatureToMemory(signatureId: string, memoryId: string): void {
     this.db
       .prepare(
@@ -1408,6 +1466,22 @@ function normalizeMetadata(metadata: Record<string, unknown>): string {
   const normalized: Record<string, unknown> = {};
   for (const key of keys) normalized[key] = metadata[key];
   return JSON.stringify(normalized);
+}
+
+function buildMemorySummary(content: string, metadata: Record<string, unknown>, provided?: string): string {
+  const clean = (value: unknown): string =>
+    String(value ?? "")
+      .replace(/\s+/g, " ")
+      .trim();
+  const limit = (value: string, max = 280): string => (value.length <= max ? value : `${value.slice(0, max - 1).trimEnd()}…`);
+
+  if (clean(provided)) return limit(clean(provided));
+  if (clean(metadata.summary)) return limit(clean(metadata.summary));
+  if (clean(metadata.future_rule)) return limit(clean(metadata.future_rule));
+  const rootCause = clean(metadata.root_cause);
+  const fixPattern = clean(metadata.fix_pattern);
+  if (rootCause && fixPattern) return limit(`Root cause: ${rootCause} Fix pattern: ${fixPattern}`);
+  return limit(clean(content));
 }
 
 function buildEmbeddingText(content: string, metadata: Record<string, unknown>): string {

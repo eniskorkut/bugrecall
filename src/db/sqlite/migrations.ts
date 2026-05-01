@@ -21,5 +21,15 @@ export function runMigrations(db: Database.Database): string[] {
     applied.push(migration.id);
   }
 
+  try {
+    db.exec(`
+      UPDATE memory_records
+      SET summary = TRIM(SUBSTR(REPLACE(REPLACE(REPLACE(content, CHAR(10), ' '), CHAR(13), ' '), CHAR(9), ' '), 1, 300))
+      WHERE summary IS NULL OR TRIM(summary) = '';
+    `);
+  } catch {
+    // no-op for older schemas
+  }
+
   return applied;
 }

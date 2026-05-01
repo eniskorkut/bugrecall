@@ -170,6 +170,7 @@ async function loadMemories() {
     if (selectedMemoryId === r.id) tr.classList.add("selected");
     tr.innerHTML = `<td class="mono">${shortId(r.id)}</td>
       <td>${r.type || "-"}</td>
+      <td>${escapeHtml(r.summary || "-")}</td>
       <td>${statusBadge(r.status)}</td>
       <td>${Number(r.confidence || 0).toFixed(2)}</td>
       <td>${r.language || "-"}</td>
@@ -216,8 +217,11 @@ async function runSearch() {
   ui.searchEmpty.textContent = "Searching...";
   ui.searchResults.innerHTML = "";
   const mode = ui.searchMode.value;
-  const data = await fetchApi(`/api/search?q=${encodeURIComponent(q)}&mode=${encodeURIComponent(mode)}&limit=10`);
+  const data = await fetchApi(
+    `/api/search?q=${encodeURIComponent(q)}&mode=${encodeURIComponent(mode)}&limit=10&detail_level=summary&include_warnings=true`,
+  );
   const results = data.results || [];
+  const warnings = data.warnings || [];
   ui.searchEmpty.classList.toggle("hidden", results.length > 0);
   ui.searchEmpty.textContent = results.length ? "" : "No results.";
   ui.searchResults.innerHTML = results
@@ -232,7 +236,12 @@ async function runSearch() {
       <pre class="code small">${escapeHtml(JSON.stringify(r.metadata || {}, null, 2))}</pre>
     </article>`,
     )
-    .join("");
+      .join("");
+  if (warnings.length > 0) {
+    ui.searchResults.innerHTML += `<article class="result-card"><div class="result-top"><span class="pill">cautions</span></div><pre class="code small">${escapeHtml(
+      JSON.stringify(warnings, null, 2),
+    )}</pre></article>`;
+  }
 }
 
 function renderPatchHistory(data) {

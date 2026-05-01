@@ -157,4 +157,10 @@ CREATE TABLE IF NOT EXISTS error_occurrences (
 );
 `,
   },
+  {
+    id: "0006_memory_summary",
+    sql: `
+ALTER TABLE memory_records ADD COLUMN summary TEXT;
+`,
+  },
 ];
