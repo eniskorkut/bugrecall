@@ -233,11 +233,18 @@ async function main(): Promise<void> {
       p1.test_command === null &&
       p1.typecheck_command === null &&
       String(result.case1Run.reason) === "command_not_configured";
+    const case2Argv = (p2.command_argv as Record<string, unknown> | undefined)?.test;
+    const case2ExpectedArgv = ["docker", "compose", "run", "--rm", "valuation-app", "python", "-m", "pytest"];
+    const case2ArgvMatch =
+      Array.isArray(case2Argv) &&
+      case2Argv.length === case2ExpectedArgv.length &&
+      case2ExpectedArgv.every((v, i) => (case2Argv as string[])[i] === v);
     const case2Ok =
       String(p2.test_command) === "docker compose run --rm valuation-app python -m pytest" &&
       String((p2.command_sources as Record<string, unknown> | undefined)?.test ?? "") === "config_override" &&
-      Array.isArray((p2.command_argv as Record<string, unknown> | undefined)?.test) &&
-      (String(result.case2Run.reason) === "command_not_configured" || result.case2Run.ok === true || String(result.case2Run.signal) === "SPAWN_ERROR");
+      case2ArgvMatch &&
+      String(result.case2Run.reason) !== "command_not_configured" &&
+      (result.case2Run.ok === true || String(result.case2Run.signal) === "SPAWN_ERROR");
     const case3Ok = String(p3.test_command) === "docker compose run --rm valuation-app python -m pytest";
     const case4Ok = p4.test_command === null && warningIncludes(result.case4Profile.warnings, "invalid_command_override_format");
     const case5Ok = p5.test_command === null && warningIncludes(result.case5Profile.warnings, "unsafe_command_override_ignored");
