@@ -6,6 +6,7 @@
         "/absolute/path/to/bugrecall/bin/pma.js"
       ],
       "env": {
+        "BUGRECALL_TOOLSET": "codex",
         "BUGRECALL_EMBEDDINGS": "false"
       }
     }

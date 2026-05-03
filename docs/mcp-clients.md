@@ -18,6 +18,28 @@ Bugrecall runs as stdio MCP server:
 }
 ```
 
+## Codex compact mode
+
+Full mode is default. For Codex, prefer compact toolset:
+
+```json
+{
+  "mcpServers": {
+    "bugrecall": {
+      "command": "node",
+      "args": ["/absolute/path/to/bugrecall/bin/pma.js"],
+      "env": {
+        "BUGRECALL_TOOLSET": "codex"
+      }
+    }
+  }
+}
+```
+
+If `env` is not supported by your Codex MCP config, use wrapper command:
+
+`env BUGRECALL_TOOLSET=codex node /absolute/path/to/bugrecall/bin/pma.js`
+
 ## Integration guides
 
 - [Generic MCP](integrations/generic-mcp.md)

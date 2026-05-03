@@ -15,6 +15,28 @@ Codex MCP configuration can vary by version/environment. Use the generic stdio c
 }
 ```
 
+## Recommended compact toolset for Codex
+
+Use compact MCP tool exposure for Codex:
+
+```json
+{
+  "mcpServers": {
+    "bugrecall": {
+      "command": "node",
+      "args": ["/absolute/path/to/bugrecall/bin/pma.js"],
+      "env": {
+        "BUGRECALL_TOOLSET": "codex"
+      }
+    }
+  }
+}
+```
+
+If your Codex MCP config does not support `env`, use wrapper command:
+
+`env BUGRECALL_TOOLSET=codex node /absolute/path/to/bugrecall/bin/pma.js`
+
 ## Recommended first instruction to Codex
 
 Use Bugrecall for this repository.  

@@ -152,6 +152,7 @@ Generic template:
 ```
 
 Codex/Claude/Cursor config UIs and file paths vary by version. Use the same stdio command and adapt to your client.
+Full mode is default. For Codex, prefer compact mode with `BUGRECALL_TOOLSET=codex` to avoid tool visibility issues.
 
 ## MCP client integration
 

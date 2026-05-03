@@ -44,6 +44,76 @@ type ProjectProfile = ProjectProfileRow;
 type ProjectIdentity = ProjectIdentityRow;
 const memoryTypeValues = ["incident", "fact", "decision", "rejected_fix", "project_preference"] as const;
 type MemoryType = (typeof memoryTypeValues)[number];
+type ToolsetMode = "full" | "codex";
+
+const fullToolNames = [
+  "health_check",
+  "bootstrap_project",
+  "get_project_profile",
+  "read_project_memory",
+  "commit_postmortem",
+  "ingest_terminal_error",
+  "search_project_experience",
+  "get_memory_detail",
+  "get_recurring_errors",
+  "record_user_correction",
+  "list_user_corrections",
+  "index_ready_memories",
+  "apply_search_replace_patch",
+  "restore_snapshot",
+  "start_task_run",
+  "get_task_run",
+  "run_project_command",
+  "log_attempt",
+  "create_debug_session",
+  "record_error_observation",
+  "suggest_next_actions",
+  "finalize_successful_fix",
+  "fail_debug_session",
+  "vectorize_pending_memories",
+  "get_vectorization_status",
+] as const;
+
+const codexToolNames = [
+  "health_check",
+  "bootstrap_project",
+  "get_project_profile",
+  "create_debug_session",
+  "run_project_command",
+  "record_error_observation",
+  "search_project_experience",
+  "suggest_next_actions",
+  "finalize_successful_fix",
+  "record_user_correction",
+] as const;
+
+function resolveActiveToolset(): ToolsetMode {
+  const raw = process.env.BUGRECALL_TOOLSET?.trim().toLowerCase();
+  if (!raw || raw === "full") {
+    return "full";
+  }
+  if (raw === "codex") {
+    return "codex";
+  }
+  console.error(`[pma] Invalid BUGRECALL_TOOLSET=${raw}; falling back to full`);
+  return "full";
+}
+
+const activeToolset = resolveActiveToolset();
+const codexToolNameSet = new Set<string>(codexToolNames);
+const fullToolNameSet = new Set<string>(fullToolNames);
+
+function isToolVisible(toolName: string): boolean {
+  if (!fullToolNameSet.has(toolName)) return false;
+  if (activeToolset === "full") {
+    return true;
+  }
+  return codexToolNameSet.has(toolName);
+}
+
+function getVisibleToolCount(): number {
+  return activeToolset === "codex" ? codexToolNames.length : fullToolNames.length;
+}
 
 const workspacePathField = {
   workspace_path: z.string().optional(),
@@ -2324,8 +2394,8 @@ export async function getVectorizationStatus(
   }
 }
 
-server.setRequestHandler(ListToolsRequestSchema, async () => ({
-  tools: [
+server.setRequestHandler(ListToolsRequestSchema, async () => {
+  const tools = [
     {
       name: "health_check",
       description: "Returns basic service health status.",
@@ -2705,14 +2775,36 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         additionalProperties: false,
       },
     },
-  ],
-}));
+  ];
+  return { tools: tools.filter((tool) => isToolVisible(tool.name)) };
+});
 
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   try {
+    if (activeToolset === "codex" && fullToolNameSet.has(request.params.name) && !codexToolNameSet.has(request.params.name)) {
+      const body = {
+        ok: false,
+        reason: "tool_not_available_in_toolset",
+        toolset: activeToolset,
+        tool_name: request.params.name,
+      };
+      return { content: [{ type: "text", text: JSON.stringify(body) }], isError: true };
+    }
+
     if (request.params.name === "health_check") {
       return {
-        content: [{ type: "text", text: JSON.stringify({ status: "ok", service: "project-memory-agent" }) }],
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              status: "ok",
+              service: "project-memory-agent",
+              version: "0.2.0",
+              active_toolset: activeToolset,
+              tool_count: getVisibleToolCount(),
+            }),
+          },
+        ],
       };
     }
 
