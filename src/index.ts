@@ -1,10 +1,10 @@
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
-import { execFileSync, spawn } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { gunzipSync, gzipSync } from "node:zlib";
 import { z } from "zod";
@@ -492,7 +492,28 @@ async function detectManifestFingerprint(workspaceRoot: string): Promise<string 
   return sha256(chunks.sort().join("|"));
 }
 
-async function detectProfile(workspaceRoot: string, repoRootDetected: boolean, workspaceRelativePath: string): Promise<ProjectProfile> {
+function commandExists(command: string, cwd: string): boolean {
+  try {
+    const res = spawnSync(command, ["--version"], { cwd, stdio: "ignore" });
+    return !res.error;
+  } catch {
+    return false;
+  }
+}
+
+function hasAnyToken(text: string, tokens: string[]): boolean {
+  return tokens.some((token) => {
+    const escaped = token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const rx = new RegExp(`(^|[^a-z0-9_\\-])${escaped}([^a-z0-9_\\-]|$)`, "i");
+    return rx.test(text);
+  });
+}
+
+async function detectProfile(
+  workspaceRoot: string,
+  repoRootDetected: boolean,
+  workspaceRelativePath: string,
+): Promise<{ profile: ProjectProfile; warnings: string[] }> {
   const packageJsonPath = path.join(workspaceRoot, "package.json");
   const pyprojectPath = path.join(workspaceRoot, "pyproject.toml");
   const requirementsPath = path.join(workspaceRoot, "requirements.txt");
@@ -512,6 +533,7 @@ async function detectProfile(workspaceRoot: string, repoRootDetected: boolean, w
   let lintCommand: string | null = null;
   let buildCommand: string | null = null;
   let typecheckCommand: string | null = null;
+  const warnings: string[] = [];
 
   const hasScript = (scripts: Record<string, string>, name: string): boolean => {
     const raw = scripts[name];
@@ -565,20 +587,69 @@ async function detectProfile(workspaceRoot: string, repoRootDetected: boolean, w
 
   if (existsSync(pyprojectPath) || existsSync(requirementsPath)) {
     languages.add("python");
-    if (existsSync(pyprojectPath)) {
-      const pyproject = (await readFile(pyprojectPath, "utf8")).toLowerCase();
-      if (pyproject.includes("fastapi")) frameworks.add("fastapi");
-      if (pyproject.includes("django")) frameworks.add("django");
-      if (pyproject.includes("flask")) frameworks.add("flask");
-      if (pyproject.includes("poetry")) packageManager = packageManager ?? "poetry";
+    const pythonCmd = commandExists("python", workspaceRoot) ? "python" : commandExists("python3", workspaceRoot) ? "python3" : null;
+    if (!commandExists("python", workspaceRoot) && pythonCmd === "python3") {
+      warnings.push("python_command_missing_using_python3");
+    }
+
+    const pyprojectText = existsSync(pyprojectPath) ? (await readFile(pyprojectPath, "utf8")).toLowerCase() : "";
+    const requirementsText = existsSync(requirementsPath) ? (await readFile(requirementsPath, "utf8")).toLowerCase() : "";
+    const setupCfgPath = path.join(workspaceRoot, "setup.cfg");
+    const setupCfgText = existsSync(setupCfgPath) ? (await readFile(setupCfgPath, "utf8")).toLowerCase() : "";
+    const requirementFiles = (await readdir(workspaceRoot)).filter((name) => /^requirements.*\.txt$/i.test(name));
+    let pythonEvidenceText = "";
+
+    if (pyprojectText) {
+      pythonEvidenceText += `\n${pyprojectText}`;
+      if (pyprojectText.includes("fastapi")) frameworks.add("fastapi");
+      if (pyprojectText.includes("django")) frameworks.add("django");
+      if (pyprojectText.includes("flask")) frameworks.add("flask");
+      if (pyprojectText.includes("poetry")) packageManager = packageManager ?? "poetry";
+    }
+    if (requirementsText) {
+      pythonEvidenceText += `\n${requirementsText}`;
+    }
+    for (const reqFile of requirementFiles) {
+      const reqPath = path.join(workspaceRoot, reqFile);
+      pythonEvidenceText += `\n${(await readFile(reqPath, "utf8")).toLowerCase()}`;
     }
     if (existsSync(uvLockPath)) packageManager = packageManager ?? "uv";
     if (existsSync(poetryLockPath)) packageManager = packageManager ?? "poetry";
     packageManager = packageManager ?? "pip";
-    testCommand = testCommand ?? "pytest";
-    lintCommand = lintCommand ?? "ruff check .";
-    buildCommand = buildCommand ?? "python -m build";
-    typecheckCommand = typecheckCommand ?? "mypy .";
+    if (requirementFiles.length === 0 && !existsSync(requirementsPath)) {
+      warnings.push("python_dependency_files_missing");
+    }
+
+    const pytestConfigured =
+      hasAnyToken(pythonEvidenceText, ["pytest"]) ||
+      pyprojectText.includes("[tool.pytest") ||
+      existsSync(path.join(workspaceRoot, "pytest.ini")) ||
+      existsSync(path.join(workspaceRoot, "tox.ini"));
+    const mypyConfigured =
+      hasAnyToken(pythonEvidenceText, ["mypy"]) ||
+      pyprojectText.includes("[tool.mypy") ||
+      existsSync(path.join(workspaceRoot, "mypy.ini")) ||
+      setupCfgText.includes("[mypy");
+    const ruffConfigured =
+      hasAnyToken(pythonEvidenceText, ["ruff"]) ||
+      pyprojectText.includes("[tool.ruff") ||
+      existsSync(path.join(workspaceRoot, "ruff.toml"));
+    const hasBuildSystem =
+      pyprojectText.includes("[build-system]") ||
+      existsSync(path.join(workspaceRoot, "setup.py")) ||
+      existsSync(setupCfgPath);
+    const buildModuleDeclared = hasAnyToken(pythonEvidenceText, ["build"]);
+
+    if (pytestConfigured && pythonCmd) testCommand = testCommand ?? `${pythonCmd} -m pytest`;
+    if (ruffConfigured && pythonCmd) lintCommand = lintCommand ?? `${pythonCmd} -m ruff check .`;
+    if (mypyConfigured && pythonCmd) typecheckCommand = typecheckCommand ?? `${pythonCmd} -m mypy .`;
+    if (hasBuildSystem && pythonCmd) buildCommand = buildCommand ?? `${pythonCmd} -m build`;
+
+    if (!pytestConfigured) warnings.push("pytest_not_configured");
+    if (!mypyConfigured) warnings.push("mypy_not_configured");
+    if (!ruffConfigured) warnings.push("ruff_not_configured");
+    if (!hasBuildSystem) warnings.push("python_build_not_configured");
+    if (hasBuildSystem && !buildModuleDeclared) warnings.push("python_build_module_not_declared");
   }
 
   if (existsSync(cargoTomlPath)) {
@@ -592,16 +663,19 @@ async function detectProfile(workspaceRoot: string, repoRootDetected: boolean, w
   }
 
   return {
-    languages: [...languages],
-    frameworks: [...frameworks],
-    package_manager: packageManager,
-    test_command: testCommand,
-    lint_command: lintCommand,
-    build_command: buildCommand,
-    typecheck_command: typecheckCommand,
-    repo_root_detected: repoRootDetected,
-    workspace_root_relative_path: workspaceRelativePath,
-    workspace_manifest_files: workspaceManifestFiles,
+    profile: {
+      languages: [...languages],
+      frameworks: [...frameworks],
+      package_manager: packageManager,
+      test_command: testCommand,
+      lint_command: lintCommand,
+      build_command: buildCommand,
+      typecheck_command: typecheckCommand,
+      repo_root_detected: repoRootDetected,
+      workspace_root_relative_path: workspaceRelativePath,
+      workspace_manifest_files: workspaceManifestFiles,
+    },
+    warnings,
   };
 }
 
@@ -633,7 +707,8 @@ export async function buildIdentityAndProfile(cwd: string, workspacePath?: strin
   const initialCommitHash =
     runGit(["rev-list", "--max-parents=0", "HEAD"], repoRoot)?.split(/\s+/)[0] ?? null;
   const manifestFingerprint = await detectManifestFingerprint(workspaceRoot);
-  const profile = await detectProfile(workspaceRoot, repoResolution.detected, workspaceRelativePath);
+  const detectedProfile = await detectProfile(workspaceRoot, repoResolution.detected, workspaceRelativePath);
+  const profile = detectedProfile.profile;
 
   const projectId = sha256(
     [
@@ -648,6 +723,7 @@ export async function buildIdentityAndProfile(cwd: string, workspacePath?: strin
   if (!(await isAgentIgnored(repoRoot))) {
     warnings.push(".agent/ is not listed in .gitignore");
   }
+  warnings.push(...detectedProfile.warnings);
 
   return {
     identity: {
@@ -1844,6 +1920,9 @@ async function runProjectCommand(
       return {
         ok: false,
         reason: "command_not_configured",
+        kind: input.kind,
+        project_id: data.identity.project_id,
+        workspace_relative_path: data.identity.workspace_relative_path,
         attempt_id: attemptId,
         budget_remaining: remainingBudget(budget, store.getTaskRunCommandUsage(input.task_run_id)),
       };
