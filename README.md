@@ -204,6 +204,33 @@ LanceDB note:
 - MVP install does not bundle `@lancedb/lancedb`.
 - If you want experimental local vector index support, install it manually in your environment.
 
+## Command Overrides (Safe Arrays)
+
+For projects that run tests/lint/typecheck/build through Docker Compose or other wrappers, use command overrides.
+
+Lookup order:
+1. `.agent/bugrecall.config.json` (local/user-specific, gitignored)
+2. `bugrecall.config.json` (optional committed team config)
+
+Example (`.agent/bugrecall.config.json`):
+
+```json
+{
+  "workspaces": {
+    "borsapy-alert": {
+      "commands": {
+        "test": ["docker", "compose", "run", "--rm", "valuation-app", "python", "-m", "pytest"]
+      }
+    }
+  }
+}
+```
+
+Rules:
+- Commands must be arrays of strings.
+- Shell strings are rejected.
+- Execution stays `spawn(..., shell: false)`.
+
 ## Evaluation
 
 ```bash

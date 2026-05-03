@@ -37,6 +37,11 @@
 - No arbitrary user-provided shell command execution through MCP tools.
 - Structured command kinds only (`test`, `lint`, `build`, `typecheck`).
 - `spawn(..., shell: false)` path used for command execution.
+- Optional command overrides:
+  - Local user config: `.agent/bugrecall.config.json`
+  - Optional committed config: `bugrecall.config.json`
+- Override commands must be JSON arrays of strings, not shell strings.
+- Unsafe executables/tokens are ignored with warnings.
 
 ## Patch safety model
 

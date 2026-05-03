@@ -40,6 +40,12 @@ const server = new Server(
 );
 
 type ProjectProfile = ProjectProfileRow;
+type CommandKindKey = "test" | "lint" | "build" | "typecheck";
+type CommandSource = "detected" | "config_override" | "not_configured";
+type ProjectProfileWithCommands = ProjectProfile & {
+  command_argv?: Partial<Record<CommandKindKey, string[]>>;
+  command_sources?: Record<CommandKindKey, CommandSource>;
+};
 
 type ProjectIdentity = ProjectIdentityRow;
 const memoryTypeValues = ["incident", "fact", "decision", "rejected_fix", "project_preference"] as const;
@@ -509,11 +515,136 @@ function hasAnyToken(text: string, tokens: string[]): boolean {
   });
 }
 
+const allowedOverrideExecutables = new Set([
+  "docker",
+  "npm",
+  "pnpm",
+  "yarn",
+  "node",
+  "python",
+  "python3",
+  "uv",
+  "poetry",
+  "make",
+  "just",
+]);
+
+const disallowedShellPattern = /(;|&&|\|\||\||>|<|`|\$\(|\r|\n)/;
+
+function isSafeOverrideToken(token: string): boolean {
+  return token.length > 0 && !disallowedShellPattern.test(token);
+}
+
+type ConfigFileShape = {
+  commands?: Partial<Record<CommandKindKey, unknown>>;
+  workspaces?: Record<string, { commands?: Partial<Record<CommandKindKey, unknown>> }>;
+};
+
+type CommandOverrideResolution = {
+  commandArgv: Partial<Record<CommandKindKey, string[]>>;
+  commandSources: Record<CommandKindKey, CommandSource>;
+  warnings: string[];
+};
+
+async function tryReadConfigFile(filePath: string): Promise<ConfigFileShape | null> {
+  if (!existsSync(filePath)) return null;
+  try {
+    const raw = await readFile(filePath, "utf8");
+    const parsed = JSON.parse(raw) as ConfigFileShape;
+    if (!parsed || typeof parsed !== "object") return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function pickWorkspaceCommandConfig(
+  config: ConfigFileShape,
+  workspaceRelativePath: string,
+): Partial<Record<CommandKindKey, unknown>> | undefined {
+  if (config.workspaces && typeof config.workspaces === "object") {
+    const ws = config.workspaces[workspaceRelativePath];
+    if (ws && typeof ws === "object" && ws.commands && typeof ws.commands === "object") {
+      return ws.commands;
+    }
+  }
+  if (config.commands && typeof config.commands === "object") return config.commands;
+  return undefined;
+}
+
+function resolveCommandOverrides(rawCommands: Partial<Record<CommandKindKey, unknown>> | undefined): CommandOverrideResolution {
+  const commandArgv: Partial<Record<CommandKindKey, string[]>> = {};
+  const commandSources: Record<CommandKindKey, CommandSource> = {
+    test: "not_configured",
+    lint: "not_configured",
+    build: "not_configured",
+    typecheck: "not_configured",
+  };
+  const warnings: string[] = [];
+  if (!rawCommands) return { commandArgv, commandSources, warnings };
+
+  const kinds: CommandKindKey[] = ["test", "lint", "build", "typecheck"];
+  for (const kind of kinds) {
+    if (!(kind in rawCommands)) continue;
+    const value = rawCommands[kind];
+    if (value === null) {
+      commandSources[kind] = "not_configured";
+      continue;
+    }
+    if (!Array.isArray(value) || value.some((part) => typeof part !== "string")) {
+      warnings.push("invalid_command_override_format");
+      continue;
+    }
+    const argv = value.map((part) => String(part));
+    if (argv.length === 0) {
+      warnings.push("invalid_command_override_format");
+      continue;
+    }
+    const executable = argv[0].trim();
+    if (!allowedOverrideExecutables.has(executable) || argv.some((token) => !isSafeOverrideToken(token))) {
+      warnings.push("unsafe_command_override_ignored");
+      continue;
+    }
+    commandArgv[kind] = argv;
+    commandSources[kind] = "config_override";
+  }
+  return { commandArgv, commandSources, warnings };
+}
+
+async function loadCommandOverrides(repoRoot: string, workspaceRelativePath: string): Promise<CommandOverrideResolution> {
+  const localPath = path.join(repoRoot, ".agent", "bugrecall.config.json");
+  const repoPath = path.join(repoRoot, "bugrecall.config.json");
+  const localConfig = await tryReadConfigFile(localPath);
+  const repoConfig = await tryReadConfigFile(repoPath);
+  const warnings: string[] = [];
+
+  if (existsSync(localPath) && localConfig === null) warnings.push("invalid_bugrecall_config");
+  if (existsSync(repoPath) && repoConfig === null) warnings.push("invalid_bugrecall_config");
+
+  const chosen = localConfig ?? repoConfig;
+  if (!chosen) {
+    return {
+      commandArgv: {},
+      commandSources: { test: "not_configured", lint: "not_configured", build: "not_configured", typecheck: "not_configured" },
+      warnings,
+    };
+  }
+
+  const rawCommands = pickWorkspaceCommandConfig(chosen, workspaceRelativePath);
+  const resolved = resolveCommandOverrides(rawCommands);
+  return {
+    commandArgv: resolved.commandArgv,
+    commandSources: resolved.commandSources,
+    warnings: [...warnings, ...resolved.warnings],
+  };
+}
+
 async function detectProfile(
+  repoRoot: string,
   workspaceRoot: string,
   repoRootDetected: boolean,
   workspaceRelativePath: string,
-): Promise<{ profile: ProjectProfile; warnings: string[] }> {
+): Promise<{ profile: ProjectProfileWithCommands; warnings: string[] }> {
   const packageJsonPath = path.join(workspaceRoot, "package.json");
   const pyprojectPath = path.join(workspaceRoot, "pyproject.toml");
   const requirementsPath = path.join(workspaceRoot, "requirements.txt");
@@ -662,20 +793,34 @@ async function detectProfile(
     packageManager = packageManager ?? "go";
   }
 
+  const overrideInfo = await loadCommandOverrides(repoRoot, workspaceRelativePath);
+  const effectiveTest = overrideInfo.commandArgv.test ? overrideInfo.commandArgv.test.join(" ") : testCommand;
+  const effectiveLint = overrideInfo.commandArgv.lint ? overrideInfo.commandArgv.lint.join(" ") : lintCommand;
+  const effectiveBuild = overrideInfo.commandArgv.build ? overrideInfo.commandArgv.build.join(" ") : buildCommand;
+  const effectiveTypecheck = overrideInfo.commandArgv.typecheck ? overrideInfo.commandArgv.typecheck.join(" ") : typecheckCommand;
+  const commandSources: Record<CommandKindKey, CommandSource> = {
+    test: overrideInfo.commandArgv.test ? "config_override" : effectiveTest ? "detected" : "not_configured",
+    lint: overrideInfo.commandArgv.lint ? "config_override" : effectiveLint ? "detected" : "not_configured",
+    build: overrideInfo.commandArgv.build ? "config_override" : effectiveBuild ? "detected" : "not_configured",
+    typecheck: overrideInfo.commandArgv.typecheck ? "config_override" : effectiveTypecheck ? "detected" : "not_configured",
+  };
+
   return {
     profile: {
       languages: [...languages],
       frameworks: [...frameworks],
       package_manager: packageManager,
-      test_command: testCommand,
-      lint_command: lintCommand,
-      build_command: buildCommand,
-      typecheck_command: typecheckCommand,
+      test_command: effectiveTest,
+      lint_command: effectiveLint,
+      build_command: effectiveBuild,
+      typecheck_command: effectiveTypecheck,
       repo_root_detected: repoRootDetected,
       workspace_root_relative_path: workspaceRelativePath,
       workspace_manifest_files: workspaceManifestFiles,
+      command_argv: overrideInfo.commandArgv,
+      command_sources: commandSources,
     },
-    warnings,
+    warnings: [...warnings, ...overrideInfo.warnings],
   };
 }
 
@@ -691,7 +836,7 @@ async function isAgentIgnored(repoRoot: string): Promise<boolean> {
 
 export async function buildIdentityAndProfile(cwd: string, workspacePath?: string): Promise<{
   identity: ProjectIdentity;
-  profile: ProjectProfile;
+  profile: ProjectProfileWithCommands;
   warnings: string[];
   repoRoot: string;
   workspaceRoot: string;
@@ -707,7 +852,7 @@ export async function buildIdentityAndProfile(cwd: string, workspacePath?: strin
   const initialCommitHash =
     runGit(["rev-list", "--max-parents=0", "HEAD"], repoRoot)?.split(/\s+/)[0] ?? null;
   const manifestFingerprint = await detectManifestFingerprint(workspaceRoot);
-  const detectedProfile = await detectProfile(workspaceRoot, repoResolution.detected, workspaceRelativePath);
+  const detectedProfile = await detectProfile(repoRoot, workspaceRoot, repoResolution.detected, workspaceRelativePath);
   const profile = detectedProfile.profile;
 
   const projectId = sha256(
@@ -1907,8 +2052,9 @@ async function runProjectCommand(
       };
     }
 
+    const overrideArgv = data.profile.command_argv?.[input.kind];
     const commandStr = store.getProjectCommandString(data.identity.project_id, input.kind);
-    if (!commandStr) {
+    if (!overrideArgv && !commandStr) {
       const attemptId = store.insertTaskAttempt({
         task_run_id: input.task_run_id,
         project_id: data.identity.project_id,
@@ -1928,25 +2074,35 @@ async function runProjectCommand(
       };
     }
 
-    const parsedCommand = parseStructuredCommand(commandStr);
-    if (!parsedCommand.ok) {
-      const attemptId = store.insertTaskAttempt({
-        task_run_id: input.task_run_id,
-        project_id: data.identity.project_id,
-        kind: "command",
-        summary: `unsafe ${input.kind} command profile`,
-        success: false,
-        metadata: { command_kind: input.kind, reason: parsedCommand.reason, command: commandStr },
-      });
-      return {
-        ok: false,
-        reason: parsedCommand.reason,
-        attempt_id: attemptId,
-        budget_remaining: remainingBudget(budget, store.getTaskRunCommandUsage(input.task_run_id)),
+    let command: StructuredCommand;
+    if (overrideArgv) {
+      command = {
+        cmd: overrideArgv[0],
+        args: overrideArgv.slice(1),
+        cwd: ".",
+        source: "config_override",
       };
+    } else {
+      const parsedCommand = parseStructuredCommand(commandStr as string);
+      if (!parsedCommand.ok) {
+        const attemptId = store.insertTaskAttempt({
+          task_run_id: input.task_run_id,
+          project_id: data.identity.project_id,
+          kind: "command",
+          summary: `unsafe ${input.kind} command profile`,
+          success: false,
+          metadata: { command_kind: input.kind, reason: parsedCommand.reason, command: commandStr },
+        });
+        return {
+          ok: false,
+          reason: parsedCommand.reason,
+          attempt_id: attemptId,
+          budget_remaining: remainingBudget(budget, store.getTaskRunCommandUsage(input.task_run_id)),
+        };
+      }
+      command = parsedCommand.value;
     }
 
-    const command = parsedCommand.value;
     const runResult = await runStructuredCommand(command.cmd, command.args, data.workspaceRoot, budget.timeout_ms);
     const success = runResult.exit_code === 0;
     const combined = `${runResult.stdout}\n${runResult.stderr}`.trim();

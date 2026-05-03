@@ -76,7 +76,8 @@
     "phase14a:check": "node dist/scripts/phase14a-check.js",
     "phase14b:check": "node dist/scripts/phase14b-check.js",
     "phase14c:check": "node dist/scripts/phase14c-check.js",
-    "phase14d:check": "node dist/scripts/phase14d-check.js"
+    "phase14d:check": "node dist/scripts/phase14d-check.js",
+    "phase14e:check": "node dist/scripts/phase14e-check.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.0",

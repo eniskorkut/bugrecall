@@ -19,6 +19,11 @@
 4. `run_project_command`
 5. `finalize_successful_fix`
 
+Command override note:
+- For Docker/remote-runtime projects, add command arrays in `.agent/bugrecall.config.json` (or `bugrecall.config.json`) and keep `shell:false` execution.
+- Example:
+  - `"test": ["docker", "compose", "run", "--rm", "valuation-app", "python", "-m", "pytest"]`
+
 ## 4. User rejected strategy workflow
 
 1. `record_user_correction`
