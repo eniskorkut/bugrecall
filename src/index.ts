@@ -1944,6 +1944,7 @@ async function createDebugSession(
       tool: "create_debug_session",
       task_run_id: created.id,
       project_id: created.project_id,
+      workspace_relative_path: data.identity.workspace_relative_path,
       recommended_flow: workflowSteps(),
       available_commands: ["test", "lint", "build", "typecheck"],
       budget: created.approval_budget,
@@ -2404,12 +2405,12 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
     {
       name: "bootstrap_project",
       description: "Bootstrap local project and persist project/profile rows in SQLite.",
-      inputSchema: { type: "object", properties: {}, additionalProperties: false },
+      inputSchema: { type: "object", properties: { workspace_path: { type: "string" } }, additionalProperties: false },
     },
     {
       name: "get_project_profile",
       description: "Return detected project identity and profile metadata.",
-      inputSchema: { type: "object", properties: {}, additionalProperties: false },
+      inputSchema: { type: "object", properties: { workspace_path: { type: "string" } }, additionalProperties: false },
     },
     {
       name: "read_project_memory",
@@ -2638,6 +2639,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         properties: {
           task_run_id: { type: "string" },
           kind: { type: "string", enum: ["test", "lint", "build", "typecheck"] },
+          workspace_path: { type: "string" },
         },
         required: ["task_run_id", "kind"],
         additionalProperties: false,
@@ -2667,6 +2669,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         properties: {
           task_text: { type: "string" },
           initial_context: { type: "string" },
+          workspace_path: { type: "string" },
           approval_budget: {
             type: "object",
             properties: {
@@ -2694,6 +2697,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           raw_output: { type: "string" },
           command_kind: { type: "string", enum: ["test", "lint", "build", "typecheck", "manual"] },
           context: { type: "object", additionalProperties: true },
+          workspace_path: { type: "string" },
         },
         required: ["task_run_id", "raw_output"],
         additionalProperties: false,
@@ -2709,6 +2713,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           normalized_error: { type: "object", additionalProperties: true },
           query: { type: "string" },
           limit: { type: "number", minimum: 1, maximum: 20, default: 5 },
+          workspace_path: { type: "string" },
         },
         required: ["task_run_id"],
         additionalProperties: false,
@@ -2733,6 +2738,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           toolchain: { type: "string" },
           workspace: { type: "string" },
           confidence: { type: "number", minimum: 0, maximum: 1, default: 0.9 },
+          workspace_path: { type: "string" },
         },
         required: ["task_run_id", "summary", "root_cause", "fix_pattern"],
         additionalProperties: false,
