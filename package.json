@@ -77,7 +77,8 @@
     "phase14b:check": "node dist/scripts/phase14b-check.js",
     "phase14c:check": "node dist/scripts/phase14c-check.js",
     "phase14d:check": "node dist/scripts/phase14d-check.js",
-    "phase14e:check": "node dist/scripts/phase14e-check.js"
+    "phase14e:check": "node dist/scripts/phase14e-check.js",
+    "phase14f:check": "tsx src/scripts/phase14f-target-override-check.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.0",

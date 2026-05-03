@@ -79,6 +79,7 @@ Notes:
 - `stdout` is reserved for MCP protocol.
 - Logs go to `stderr`.
 - Usually your MCP client starts this command automatically.
+- After Bugrecall code updates, run `npm run build` and restart your MCP client/session so it picks up new server behavior.
 
 ## Run dashboard
 
